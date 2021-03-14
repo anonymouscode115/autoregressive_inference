@@ -1,5 +1,7 @@
 # Learning Autoregressive Orderings with Variational Inference
 
+## Note: We are currently in the process of finalizing our ICLR camera ready version and arxiving our paper. We expect to release an updated version of code and the pretrained models along with many more results by early Apr, 2021.
+
 ## Installation
 
 To install this package, first download the package from github, then install it using pip.
