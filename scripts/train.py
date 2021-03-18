@@ -7,9 +7,6 @@ from voi.process.captions import Vocabulary
 import tensorflow as tf
 import argparse
 
-# tf.compat.v1.disable_eager_execution()
-# sess = get_session()
-
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
@@ -319,14 +316,6 @@ if __name__ == "__main__":
                                unknown_id=1))
 
     with strategy.scope():
-        # Since the transformer contains both the logits layer
-        # and the pointer layer, which can both be the final layers,
-        # do not call model(inputs) directly. Instead, use the 
-        # model's loss function and the beam/greedy search function
-        # to obtain results
-        
-        # in the case of translation, model_src_embedding is unused
-        # because the vocabulary is shared between src and tgt
         
         def get_src_tgt_embedding():
             if args.dataset == 'captioning':
@@ -358,6 +347,11 @@ if __name__ == "__main__":
         else:
             pt_src_embedding, pt_tgt_embedding = get_src_tgt_embedding() 
         
+        # The decoder autoregressive transformer's "call" function
+        # is dummy by design and is only used for initializing the parameters.
+        # Do not call model(inputs) to get the results. 
+        # Instead, use the model's loss function and the beam/greedy search function
+        # to obtain results        
         model = Transformer(vocabs[-1].size(),
                             args.embedding_size,
                             args.heads,
@@ -420,5 +414,3 @@ if __name__ == "__main__":
                   args.use_ppo,
                   args.embedding_align_coeff,
                   args.decoder_training_scheme)
-    
-# sess.close()
