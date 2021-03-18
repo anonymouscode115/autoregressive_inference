@@ -3,7 +3,7 @@ from voi.data.load_wmt import wmt_dataset
 from voi.nn.input import TransformerInput
 from voi.nn.input import RegionFeatureInput
 from voi.algorithms.beam_search import beam_search
-from voi.algorithms.nucleas_sampling import nucleas_sampling
+from voi.algorithms.nucleus_sampling import nucleus_sampling
 from voi.birkoff_utils import birkhoff_von_neumann
 from voi.permutation_utils import permutation_to_pointer
 from voi.permutation_utils import permutation_to_relative
