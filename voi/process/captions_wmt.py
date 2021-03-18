@@ -56,6 +56,7 @@ def process_wmt(out_feature_folder,
     one_vocab: bool
         use one vocabulary instead of src&tgt"""
 
+    print("""Please make sure to remove diacritics first in datasets like ro-en""")
     # make the output folder if it does not exist already
     tf.io.gfile.makedirs(out_feature_folder)
 
@@ -97,8 +98,68 @@ def process_wmt(out_feature_folder,
         all_src_words.extend([src_list])
         all_tgt_words.extend([tgt_list])
 
-    print("tot_lines", tot_lines)
+    print("total_lines", tot_lines)
     
+    def create_vocab_file(freq, min_word_frequency, vocab_file):
+        if not tf.io.gfile.exists(vocab_file):
+            # sort the dictionary using the frequencies as the key
+            sorted_w, sorted_freq = list(
+                zip(*sorted(freq.items(), key=(lambda x: x[1]), reverse=True)))
+
+            # determine where to split the vocabulary
+            split = 0
+            for split, frequency in enumerate(sorted_freq):
+                if frequency < min_word_frequency:
+                    break
+
+            # write the vocabulary file to the disk
+            vocab = ("<pad>", "<unk>", "<start>", "<end>") + sorted_w[:(split + 1)]
+            with tf.io.gfile.GFile(vocab_file, "w") as f:
+                f.write("\n".join(vocab))
+        else:
+            # use an existing vocab file such as the training vocab file
+            with tf.io.gfile.GFile(vocab_file, "r") as f:
+                vocab = [x.strip() for x in f.readlines()]
+        return Vocabulary(vocab, unknown_word="<unk>", unknown_id=1)
+
+    if not one_vocab:
+        print("""Warning: you are creating two separate vocab files for source and target data;
+                 however, currently training only implements using one single vocab for source
+                 and target (as this saves memory). """)
+        src_vocab = create_vocab_file(src_freq, min_word_frequency, 
+                                     os.path.dirname(vocab_file) + "/src_" + os.path.basename(vocab_file))
+        tgt_vocab = create_vocab_file(tgt_freq, min_word_frequency, 
+                                     os.path.dirname(vocab_file) + "/tgt_" + os.path.basename(vocab_file))
+        # create mappings from words to integers
+        data_list = []
+        for index in range(len(all_src_words)):
+            src_word_ids = np.concatenate(
+                    [[2], src_vocab.words_to_ids(tf.constant(all_src_words[index])), [3]], 0)
+            tgt_word_ids = np.concatenate(
+                    [[2], tgt_vocab.words_to_ids(tf.constant(all_tgt_words[index])), [3]], 0)
+            data_list.append(LanguagePair(Sentence(src_word_ids, None), Sentence(tgt_word_ids, None)))
+    else:
+        vocab = create_vocab_file(freq, min_word_frequency, 
+                                  os.path.join(os.path.dirname(vocab_file), os.path.basename(vocab_file)))
+        # create mappings from words to integers
+        data_list = []
+        for index in range(len(all_src_words)):
+            src_word_ids = np.concatenate(
+                    [[2], vocab.words_to_ids(tf.constant(all_src_words[index])), [3]], 0)
+            tgt_word_ids = np.concatenate(
+                    [[2], vocab.words_to_ids(tf.constant(all_tgt_words[index])), [3]], 0)
+            data_list.append(LanguagePair(Sentence(src_word_ids, None), Sentence(tgt_word_ids, None)))            
+
+    sample_path = os.path.join(
+        out_feature_folder, dataset_type + ".pkl")
+    with tf.io.gfile.GFile(sample_path, "wb") as f:
+        f.write(pkl.dumps(data_list))
+        
+        
+        
+        
+# legacy function for adding new vocabs to an existing vocab file
+"""
     def create_vocab_file(freq, min_word_frequency, vocab_file):
         if (not tf.io.gfile.exists(vocab_file)) or (dataset_type == "train"):
             # sort the dictionary using the frequencies as the key
@@ -118,8 +179,8 @@ def process_wmt(out_feature_folder,
                 with tf.io.gfile.GFile(vocab_file, "w") as f:
                     f.write("\n".join(vocab))
             else:
-                print("Adding to old vocabulary:")
-                # load vocab file and append vocabs in the end
+                print("Adding new vocabs to existing old vocab file:")
+                # load vocab file and append new vocabs in the end
                 with tf.io.gfile.GFile(vocab_file, "r") as f:
                     old_vocab = [x.strip() for x in f.readlines()]
                 new_vocab = []
@@ -137,37 +198,5 @@ def process_wmt(out_feature_folder,
             # use an existing vocab file such as the training vocab file
             with tf.io.gfile.GFile(vocab_file, "r") as f:
                 vocab = [x.strip() for x in f.readlines()]
-        return Vocabulary(vocab, unknown_word="<unk>", unknown_id=1)
-
-    #vocab = create_vocab_file(freq, min_word_frequency, vocab_file)
-    if not one_vocab:
-        src_vocab = create_vocab_file(src_freq, min_word_frequency, 
-                                     os.path.dirname(vocab_file) + "/src_" + os.path.basename(vocab_file))
-        tgt_vocab = create_vocab_file(tgt_freq, min_word_frequency, 
-                                     os.path.dirname(vocab_file) + "/tgt_" + os.path.basename(vocab_file))
-
-        # create mappings from words to integers
-        data_list = []
-        for index in range(len(all_src_words)):
-            src_word_ids = np.concatenate(
-                    [[2], src_vocab.words_to_ids(tf.constant(all_src_words[index])), [3]], 0)
-            tgt_word_ids = np.concatenate(
-                    [[2], tgt_vocab.words_to_ids(tf.constant(all_tgt_words[index])), [3]], 0)
-            data_list.append(LanguagePair(Sentence(src_word_ids, None), Sentence(tgt_word_ids, None)))
-    else:
-        vocab = create_vocab_file(freq, min_word_frequency, 
-                                  os.path.join(os.path.dirname(vocab_file), os.path.basename(vocab_file)))
-
-        # create mappings from words to integers
-        data_list = []
-        for index in range(len(all_src_words)):
-            src_word_ids = np.concatenate(
-                    [[2], vocab.words_to_ids(tf.constant(all_src_words[index])), [3]], 0)
-            tgt_word_ids = np.concatenate(
-                    [[2], vocab.words_to_ids(tf.constant(all_tgt_words[index])), [3]], 0)
-            data_list.append(LanguagePair(Sentence(src_word_ids, None), Sentence(tgt_word_ids, None)))            
-
-    sample_path = os.path.join(
-        out_feature_folder, dataset_type + ".pkl")
-    with tf.io.gfile.GFile(sample_path, "wb") as f:
-        f.write(pkl.dumps(data_list))
+        return Vocabulary(vocab, unknown_word="<unk>", unknown_id=1) 
+"""

@@ -16,7 +16,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--min_word_frequency', type=int, default=1)
     parser.add_argument(
-        '--dataset_type', type=str, default='validation', choices=['train', 'validation', 'test'])
+        '--dataset_type', type=str, default='validation', choices=['train', 'validation', 'test', 'distillation'])
     parser.add_argument(
         '--one_vocab', action='store_true')    
     args = parser.parse_args()

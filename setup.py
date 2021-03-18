@@ -3,10 +3,10 @@ from setuptools import setup
 
 
 REQUIRED_PACKAGES = ['tensorflow==2.3',
-                     'tensorflow-probability',
+                     'tensorflow-probability==0.11.0',
                      'tensorflow_datasets',
-                     'torch',
-                     'torchvision',
+                     'torch==1.4',
+                     'torchvision==0.5.0',
                      'numpy',
                      'nltk',
                      'networkx',

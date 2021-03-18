@@ -68,7 +68,7 @@ class EncoderWithPositionLayer(Layer):
         self.num_pos = num_pos
         self.kwargs = kwargs
 
-    def call(self, inputs, **kwargs):
+    def call_main(self, inputs, return_scores=False, **kwargs):
         """Runs a forward pass on a multi head attention layer
         inputs is an instance of TransformerInput
 
@@ -77,6 +77,8 @@ class EncoderWithPositionLayer(Layer):
         inputs: TransformerInput
             a dataclass instance that contains queries, keys
             and values along with masks
+        return_scores: bool
+            whether to return attention scores            
 
         Returns:
 
@@ -109,8 +111,12 @@ class EncoderWithPositionLayer(Layer):
         # pass the input through an attention processing block and
         # flatten the heads and channels
         mask = tf.expand_dims(values_mask, 1)
-        x = self.attention([x[..., :dim], x[..., dim:2*dim], x[..., 2*dim:],
-                            mask, mask, bias], **kwargs)
+        if not return_scores:
+            x = self.attention([x[..., :dim], x[..., dim:2*dim], x[..., 2*dim:],
+                                mask, mask, bias], **kwargs)
+        else:
+            x, scores = self.attention([x[..., :dim], x[..., dim:2*dim], x[..., 2*dim:],
+                                mask, mask, bias], return_scores=True, **kwargs)
         x = tf.reshape(tf.transpose(x, [
             0, 2, 1, 3]), [shape[0], shape[1], self.heads * dim])
 
@@ -119,12 +125,21 @@ class EncoderWithPositionLayer(Layer):
         values = values + x
         values = values + self.block1(values, **kwargs)
         
-        return [queries, values, queries_mask, values_mask, ids, permutation,
-                absolute_positions, relative_positions,
-                pointer_labels, logits_labels, 
-                partial_pos, pointer_probs, log_probs,
-                object_detections, object_features, object_boxes]
+        return_args = [queries, values, queries_mask, values_mask, ids, permutation,
+            absolute_positions, relative_positions,
+            pointer_labels, logits_labels, 
+            partial_pos, pointer_probs, log_probs,
+            object_detections, object_features, object_boxes]
+        if return_scores:
+            return_args = (return_args, [scores])
+        return return_args
 
+    def call(self, inputs, **kwargs):
+        return self.call_main(inputs, **kwargs)
+    
+    def visualize(self, inputs, **kwargs):
+        return self.call_main(inputs, return_scores=True, **kwargs)  
+    
     def get_config(self):
         """Creates a state dictionary that can be used to rebuild
         the layer in another python process

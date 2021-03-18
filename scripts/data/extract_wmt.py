@@ -14,6 +14,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir",
                         type=str,
                         default=None)
+    parser.add_argument('--truecase', action='store_true')
     args = parser.parse_args()
     
     assert len(args.language_pair) == 3
@@ -30,7 +31,10 @@ if __name__ == "__main__":
     tgt_nm = MosesPunctuationNormalizer(args.language_pair[2])
     
     def proc_line(line, t, n):
-        result = t(n(line.decode('utf-8').lower()))
+        if args.truecase:
+            result = t(n(line.decode('utf-8')))
+        else:
+            result = t(n(line.decode('utf-8').lower()))
         l = len(result)
         result = ' '.join(result)
         return l, result
@@ -38,8 +42,13 @@ if __name__ == "__main__":
     dsets = ['train', 'validation', 'test']
     for ds in dsets:
         npds = tfds.as_numpy(datasets)[ds]
-        f1 = open(os.path.join(args.data_dir, "wmt{}_translate/{}-{}".format(yr, src, tgt), "src_raw_{}.txt".format(ds)), "w")
-        f2 = open(os.path.join(args.data_dir, "wmt{}_translate/{}-{}".format(yr, src, tgt), "tgt_raw_{}.txt".format(ds)), "w")
+        if args.truecase:
+            f1 = open(os.path.join(args.data_dir, "wmt{}_translate/{}-{}".format(yr, src, tgt), "src_truecase_{}.txt".format(ds)), "w")
+            f2 = open(os.path.join(args.data_dir, "wmt{}_translate/{}-{}".format(yr, src, tgt), "tgt_truecase_{}.txt".format(ds)), "w")
+        else:
+            f1 = open(os.path.join(args.data_dir, "wmt{}_translate/{}-{}".format(yr, src, tgt), "src_raw_{}.txt".format(ds)), "w")
+            f2 = open(os.path.join(args.data_dir, "wmt{}_translate/{}-{}".format(yr, src, tgt), "tgt_raw_{}.txt".format(ds)), "w")
+            
         for line in npds:
             l1, result1 = proc_line(line[0], src_tokenizer, src_nm)
             l2, result2 = proc_line(line[1], tgt_tokenizer, tgt_nm)

@@ -20,7 +20,9 @@ if __name__ == "__main__":
     parser.add_argument(
         '--vocab_file', type=str, nargs='+')
     parser.add_argument(
-        '--model_ckpt', type=str, default='ckpt/nsds.ckpt')
+        '--model_ckpt', type=str, default='ckpt/nsds.h5')
+    parser.add_argument(
+        '--hungarian_op_path', type=str, default='./hungarian.so')     
     parser.add_argument(
         '--embedding_size', type=int, default=256)
     parser.add_argument(
@@ -35,7 +37,7 @@ if __name__ == "__main__":
         default='indigo', choices=['indigo', 'logits'])
     parser.add_argument(
         '--order', type=str,
-        default='soft', choices=['l2r', 'r2l', 'rare', 'common', 'soft'])
+        default='soft', choices=['l2r', 'r2l', 'rare', 'common', 'soft', 'sao'])
     parser.add_argument(
         '--policy_gradient', type=str,
         default='none', choices=['with_bvn', 'without_bvn', 'none'])
@@ -143,7 +145,8 @@ if __name__ == "__main__":
                                            pg_final_layer=args.pt_pg_type,
                                            pt_positional_attention=args.pt_positional_attention,
                                            pt_relative_embedding=args.pt_relative_embedding,
-                                           dataset=args.dataset)
+                                           dataset=args.dataset,
+                                           hungarian_op_path=args.hungarian_op_path)
 
     inspect_order_dataset(
         args.validate_folder,

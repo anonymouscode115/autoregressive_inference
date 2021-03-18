@@ -118,8 +118,10 @@ def process_gigaword(out_feature_folder,
                 vocab = [x.strip() for x in f.readlines()]
         return Vocabulary(vocab, unknown_word="<unk>", unknown_id=1)
 
-    #vocab = create_vocab_file(freq, min_word_frequency, vocab_file)
     if not one_vocab:
+        print("""Warning: you are creating two separate vocab files for source and target data;
+                 however, currently training only implements using one single vocab for source
+                 and target (as this saves memory). """)
         src_vocab = create_vocab_file(src_freq, min_word_frequency, 
                                      os.path.dirname(vocab_file) + "/src_" + os.path.basename(vocab_file))
         tgt_vocab = create_vocab_file(tgt_freq, min_word_frequency, 

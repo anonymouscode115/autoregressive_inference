@@ -3,6 +3,7 @@ from voi.data.load_wmt import wmt_dataset
 from voi.nn.input import TransformerInput
 from voi.nn.input import RegionFeatureInput
 from voi.algorithms.beam_search import beam_search
+from voi.algorithms.nucleas_sampling import nucleas_sampling
 from voi.birkoff_utils import birkhoff_von_neumann
 from voi.permutation_utils import permutation_to_pointer
 from voi.permutation_utils import permutation_to_relative
@@ -127,21 +128,14 @@ def prepare_permutation(batch,
         bt, bw = batch['decoder_token_indicators'], batch['decoder_words']
     inputs[5] = get_permutation(bt, bw, tf.constant('l2r'))
 
-    # apply the birkhoff-von neumann decomposition to support general
-    # doubly stochastic matrices
-    p, c = birkhoff_von_neumann(inputs[5], tf.constant(20))
-    c = c / tf.reduce_sum(c, axis=1, keepdims=True)
-
     # convert the permutation to absolute and relative positions
     inputs[6] = inputs[5][:, :-1, :-1]
-    inputs[7] = tf.reduce_sum(permutation_to_relative(
-        p) * c[..., tf.newaxis, tf.newaxis, tf.newaxis], axis=1)
+    inputs[7] = permutation_to_relative(inputs[5])
 
     # convert the permutation to label distributions
     # also records the partial absolute position at each decoding time step
-    hard_pointer_labels, inputs[10] = permutation_to_pointer(p)
-    inputs[8] = tf.reduce_sum(
-        hard_pointer_labels * c[..., tf.newaxis, tf.newaxis], axis=1)
+    hard_pointer_labels, inputs[10] = permutation_to_pointer(inputs[5][:, tf.newaxis, :, :])
+    inputs[8] = tf.squeeze(hard_pointer_labels, axis=1)
     inputs[9] = tf.matmul(inputs[5][
         :, 1:, 1:], tf.one_hot(inputs[4], tf.cast(tgt_vocab_size, tf.int32)))
 
@@ -219,13 +213,14 @@ def validate_dataset(tfrecord_folder,
             tf.distribute.ReduceOp.SUM, result, axis=None)  
     
     def decode_function(b):
-        # calculate the ground truth sequence for this batch; and
-        # perform beam search using the current model
-        # show several model predicted sequences and their likelihoods
+        # perform beam search using the current model and also
+        # get the log probability of sequence
         if dataset_type == 'captioning':
             maxit = 40
-        elif dataset_type in ['wmt', 'django', 'gigaword']:
+        elif dataset_type in ['wmt', 'django']:
             maxit = 150        
+        elif dataset_type in ['gigaword']:
+            maxit = 40
         inputs = prepare_batch(b)
         cap, logp = beam_search(
             inputs, model, dataset_type, beam_size=beam_size, max_iterations=maxit)
@@ -244,14 +239,16 @@ def validate_dataset(tfrecord_folder,
     for batch in dataset:
         wrapped_dummy_loss_function(batch)
         break
-    print("----------Done defining weights of model-----------")
-    
+        
+    print("----------Done initializing the weights of the model-----------") 
     model.load_weights(model_ckpt)
+    print("----------Done loading the weights of the model-----------")    
 
-    # for captioning
+    # for captioning tasks because there are multiple references per image
     ref_caps = {}
     hyp_caps = {}
-    # for non-captioning
+    # for non-captioning tasks because there is only one reference per source,
+    # so we can pair each reference with each hypothesis through the same index
     ref_caps_list = []
     hyp_caps_list = []    
         
@@ -280,6 +277,8 @@ def validate_dataset(tfrecord_folder,
     # loop through the entire dataset once (one epoch)
     b_idx = 0
     
+    # eliminate all elements in the array whose 
+    # batch dimension is zero
     def eliminate_empty(arr):
         result = []
         for x in arr:
@@ -289,8 +288,7 @@ def validate_dataset(tfrecord_folder,
         
     for batch in dataset:
         b_idx += 1
-#         if b_idx > 150:
-#             break
+        
         # for every element of the batch select the path that
         # corresponds to ground truth words
         if dataset_type == 'captioning':
@@ -308,6 +306,12 @@ def validate_dataset(tfrecord_folder,
                     ref_caps[file_path] = [
                         x for x in f.read().strip().lower().split("\n")
                         if len(x) > 0]
+                    # Note that it's important to strip() and rejoin the reference captions 
+                    # with a single space because they might have multiple
+                    # spaces between two tokens; 
+                    # Also note that when we were training the model, we never output
+                    # spaces. Only when we calculate the metrics, the output tokens
+                    # are joined through spaces.
                     ref_caps[file_path] = [' '.join(nltk.word_tokenize(x.strip())) 
                                            for x in ref_caps[file_path]]
                         
@@ -318,20 +322,21 @@ def validate_dataset(tfrecord_folder,
         if strategy.num_replicas_in_sync == 1:
             cap = cap.numpy()
         else:
+            # when evaluating on multi gpus, the data might be distributed
+            # in a way such that some gpus receive empty inputs, 
+            # i.e. the batch dimension is zero
             cap = tf.concat(eliminate_empty(cap.values), axis=0).numpy()
             log_p = tf.concat(eliminate_empty(log_p.values), axis=0)
 
         if dataset_type in ['wmt', 'django', 'gigaword']:
             if strategy.num_replicas_in_sync == 1:
-                bd = batch['decoder_words']
+                bdw = batch['decoder_words']
             else:
-                bd = tf.concat(batch['decoder_words'].values, axis=0)
+                bdw = tf.concat(batch['decoder_words'].values, axis=0)
             wmt_truth_sentences = tf.strings.reduce_join(
-                vocabs[-1].ids_to_words(bd), axis=1, separator=' ').numpy()
+                vocabs[-1].ids_to_words(bdw), axis=1, separator=' ').numpy()
 
-        # format the model predictions into a string; the evaluation package
-        # requires input to be strings; not there will be slight
-        # formatting differences between ref and hyp
+        # format the model predictions into a string
         for i in range(cap.shape[0]):
             if dataset_type == 'captioning':
                 hyp_caps[paths[i]] = cap[i, 0].decode("utf-8").replace(
@@ -344,38 +349,33 @@ def validate_dataset(tfrecord_folder,
                 label_sentence = wmt_truth_sentences[i].decode("utf-8").replace(
                     "<pad>", "").replace("<start>", "").replace(
                     "<end>", "").replace("  ", " ").strip()
-                
                 model_sentence = cap[i, 0].decode("utf-8").replace(
                     "<pad>", "").replace("<start>", "").replace(
                     "<end>", "").replace("  ", " ").strip()
-                
                 print("{}: [p = {}] {}".format(i, 
                                                np.exp(log_p[i, 0].numpy()),
-                                               model_sentence))                 
-                    
+                                               model_sentence))
                 ref_caps_list.append(label_sentence)
                 hyp_caps_list.append(model_sentence)
+         
+        # print out intermediate metrics after each batch
         if dataset_type == 'captioning':
-#             print("ref:", ref_caps)
-#             print("hyp:", hyp_caps)
             tmp_ref_caps_list = []
             tmp_hyp_caps_list = []
             for key in ref_caps.keys():
                 tmp_ref_caps_list.append(ref_caps[key])
                 tmp_hyp_caps_list.append(hyp_caps[key])
-
             for scorer in scorers:
                 scores = scorer.score(tmp_hyp_caps_list, [*zip(*tmp_ref_caps_list)])
                 print(f'Vizseq Corpus-level {scorer} till now: {scores.corpus_score}')
         elif dataset_type in ['wmt', 'django', 'gigaword']:
-            #print("ref:", ref_caps_list)
-            #print("hyp:", hyp_caps_list)
             scores = scorers[0].score(hyp_caps_list, [ref_caps_list])
             if dataset_type != 'gigaword':
-                print(f'Corpus-level BLEU till now (for wmt/iwslt this is not real score; please post-process): {scores.corpus_score}')            
+                print(f'Corpus-level BLEU till now (for wmt/iwslt/gigaword this is not real score; please post-process): {scores.corpus_score}')            
             else:
-                print(f'Corpus-level ROUGE-1 till now (for wmt/iwslt this is not real score; please post-process): {scores.corpus_score}')                
+                print(f'Corpus-level ROUGE-1 till now (for wmt/iwslt/gigaword this is not real score; please post-process): {scores.corpus_score}')                
 
+    # calculate the final metrics
     if dataset_type == 'captioning':
         # convert the dictionaries into lists for nlg eval input format
         for key in ref_caps.keys():
@@ -395,7 +395,6 @@ def validate_dataset(tfrecord_folder,
         metrics = nlgeval.compute_metrics([*zip(*ref_caps_list)], hyp_caps_list)
         for key in metrics.keys():
             print("Eval/{}".format(key), metrics[key])
-            
     elif dataset_type in ['wmt', 'django', 'gigaword']:
         with open(os.path.join(save_path, "ref_caps_list.txt"), "w") as f:
             for t in ref_caps_list:
@@ -405,7 +404,9 @@ def validate_dataset(tfrecord_folder,
                 print(t, file=f)                
         for scorer in scorers:
             scores = scorer.score(hyp_caps_list, [ref_caps_list])
-            print(f'Corpus-level {scorer} (for wmt/iwslt this is not real score; please run post-processing scripts): {scores.corpus_score}')
+            print(f'''Corpus-level {scorer} \
+                  (for wmt/iwslt/gigaword this is not real score; \
+                  please run post-processing scripts): {scores.corpus_score}''')
         
         if dataset_type == 'django':
             tot_sentences = len(ref_caps_list)
@@ -415,6 +416,8 @@ def validate_dataset(tfrecord_folder,
                     correct += 1
             print("accuracy {} {}".format(correct, tot_sentences), correct / tot_sentences)
             
+        # eliminate ground truth sentences with <unk> tokens and recalculate the metrics
+        # this result is only used as a reference / debugging
         no_unk_ids = []
         for idx in range(len(ref_caps_list)):
             if not "<unk>" in ref_caps_list[idx]:
@@ -429,7 +432,9 @@ def validate_dataset(tfrecord_folder,
         
         for scorer in scorers:
             scores = scorer.score(hyp_caps_list, [ref_caps_list])
-            print(f'No-<unk> Corpus-level {scorer} (for wmt/iwslt this is not real score; please run post-processing scripts): {scores.corpus_score}')
+            print(f'''No-<unk> Corpus-level {scorer} \
+                  (for wmt/iwslt/gigaword this is not real score; \
+                  please run post-processing scripts): {scores.corpus_score}''')
         
         if dataset_type == 'django':
             tot_sentences = len(ref_caps_list)

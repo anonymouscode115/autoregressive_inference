@@ -5,7 +5,6 @@ from voi.permutation_utils import pt_permutation_to_relative_l2r
 from voi.nn.position_encoding import position_encoding_relative
 import tensorflow as tf
 
-""" This layer is only for Permutation transformer"""
 class EncoderWithPositionalAttentionLayer(Layer):
 
     def __init__(self,
@@ -17,8 +16,13 @@ class EncoderWithPositionalAttentionLayer(Layer):
                  values_dropout=0.,
                  causal=True,
                  **kwargs):
-        """Creates a Transformer encoder layer by applying a
-        multi head self attention layer
+        """
+        Relative positional attention as in 
+        https://arxiv.org/pdf/1901.02860.pdf
+        
+        Besides applying this layer to the Permutation Transformer's
+        encoder, we could possibly apply this to the Transformer-INDIGO's encoder;
+        for simplicity, we did not discover this option in our paper
 
         Arguments:
 
@@ -75,7 +79,7 @@ class EncoderWithPositionalAttentionLayer(Layer):
         self.causal = causal
         self.kwargs = kwargs
 
-    def call(self, inputs, **kwargs):
+    def call_main(self, inputs, return_scores=False, **kwargs):
         """Runs a forward pass on a multi head attention layer
         inputs is an instance of TransformerInput
 
@@ -84,6 +88,8 @@ class EncoderWithPositionalAttentionLayer(Layer):
         inputs: TransformerInput
             a dataclass instance that contains queries, keys
             and values along with masks
+        return_scores: bool
+            whether to return attention scores            
 
         Returns:
 
@@ -97,10 +103,9 @@ class EncoderWithPositionalAttentionLayer(Layer):
          logits_labels, partial_pos, pointer_probs, log_probs,
          object_detections, object_features, object_boxes] = inputs
         
-        # pass the input through a feed forward processing block and
-        # separate heads from channels
         shape, dim = tf.shape(values), self.input_size // self.heads
         
+        # encoder self-attention with relative-positional encodings as in Transformer-XL
         rel = pt_permutation_to_relative_l2r(1, shape[1], tf.constant(self.relative_length)) #one_hot
         rel = tf.matmul(rel, self.relative_encoding) # (1, shape[1], shape[1], input_size)
         
@@ -126,11 +131,13 @@ class EncoderWithPositionalAttentionLayer(Layer):
         biasprod = tf.reduce_sum(new_q[:, :, :, tf.newaxis, :] * new_kr, axis=-1)
         bias = biasprod + bias0 + bias1
         
-        # pass the input through an attention processing block and
-        # flatten the heads and channels
         mask = tf.expand_dims(values_mask, 1)
-        x = self.attention([new_q, new_ke, new_kv,
-                            mask, mask, bias], **kwargs)                            
+        if not return_scores:
+            x = self.attention([new_q, new_ke, new_kv,
+                                mask, mask, bias], **kwargs)                            
+        else:
+            x, scores = self.attention([new_q, new_ke, new_kv,
+                                mask, mask, bias], return_scores=True, **kwargs) 
         x = tf.reshape(tf.transpose(x, [
             0, 2, 1, 3]), [shape[0], shape[1], self.heads * dim])
 
@@ -139,12 +146,21 @@ class EncoderWithPositionalAttentionLayer(Layer):
         values = values + x
         values = values + self.block1(values, **kwargs)
         
-        return [queries, values, queries_mask, values_mask, ids, permutation,
-                absolute_positions, relative_positions,
-                pointer_labels, logits_labels, 
-                partial_pos, pointer_probs, log_probs,
-                object_detections, object_features, object_boxes]
+        return_args = [queries, values, queries_mask, values_mask, ids, permutation,
+            absolute_positions, relative_positions,
+            pointer_labels, logits_labels, 
+            partial_pos, pointer_probs, log_probs,
+            object_detections, object_features, object_boxes]
+        if return_scores:
+            return_args = (return_args, [scores])
+        return return_args
 
+    def call(self, inputs, **kwargs):
+        return self.call_main(inputs, **kwargs)
+    
+    def visualize(self, inputs, **kwargs):
+        return self.call_main(inputs, return_scores=True, **kwargs)  
+    
     def get_config(self):
         """Creates a state dictionary that can be used to rebuild
         the layer in another python process

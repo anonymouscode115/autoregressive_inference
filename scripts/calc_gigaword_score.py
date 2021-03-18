@@ -1,6 +1,6 @@
 from vizseq.scorers.rouge import Rouge1Scorer, Rouge2Scorer, RougeLScorer
 # vizseq RIBES Scorer implementation seems buggy and gives very low scores
-# vizseq BLEU needs to take in ' '.join(tokenized_input) and not detokenized, 
+# vizseq BLEU needs to take in ' '.join(tokenized_input) instead of detokenized input, 
 # or it gives very low scores compared to sacrebleu
 from mosestokenizer import *
 import argparse
@@ -28,9 +28,6 @@ for line in f2:
     line = line.strip()
     l2.append(line)
     
-new_l1 = l1
-new_l2 = l2
-    
 print("VIZSEQ scores:")
 for s in scorers:
-    print(s, s.score(new_l1, [new_l2])[0]*100)
+    print(s, s.score(l1, [l2])[0]*100)

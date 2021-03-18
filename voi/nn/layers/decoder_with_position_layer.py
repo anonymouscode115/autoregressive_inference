@@ -72,7 +72,7 @@ class DecoderWithPositionLayer(Layer):
         self.causal = causal
         self.kwargs = kwargs
 
-    def call(self, inputs, **kwargs):
+    def call_main(self, inputs, return_scores=False, **kwargs):
         """Runs a forward pass on a multi head attention layer
         inputs is an instance of TransformerInput
 
@@ -81,6 +81,8 @@ class DecoderWithPositionLayer(Layer):
         inputs: TransformerInput
             a dataclass instance that contains queries, keys
             and values along with masks
+        return_scores: bool
+            whether to return attention scores            
 
         Returns:
 
@@ -116,8 +118,12 @@ class DecoderWithPositionLayer(Layer):
         # pass the input through an attention processing block and
         # flatten the heads and channels
         mask0 = tf.expand_dims(queries_mask, 1)
-        x = self.attention0([x[..., :dim], x[..., dim:2*dim], x[..., 2*dim:],
-                             mask0, mask0, bias], **kwargs)
+        if not return_scores:
+            x = self.attention0([x[..., :dim], x[..., dim:2*dim], x[..., 2*dim:],
+                                 mask0, mask0, bias], **kwargs)
+        else:
+            x, scores0 = self.attention0([x[..., :dim], x[..., dim:2*dim], x[..., 2*dim:],
+                                 mask0, mask0, bias], **kwargs)
         x = tf.reshape(tf.transpose(x, [
             0, 2, 1, 3]), [s0[0], s0[1], self.heads * dim])
 
@@ -137,8 +143,12 @@ class DecoderWithPositionLayer(Layer):
         # pass the input through an attention processing block and
         # flatten the heads and channels
         mask1 = tf.expand_dims(values_mask, 1)
-        x = self.attention1([y, x[..., :dim], x[..., dim:],
-                             mask0, mask1], **kwargs)
+        if not return_scores:
+            x = self.attention1([y, x[..., :dim], x[..., dim:],
+                                 mask0, mask1], **kwargs)
+        else:
+            x, scores1 = self.attention1([y, x[..., :dim], x[..., dim:],
+                                 mask0, mask1], **kwargs)
         x = tf.reshape(tf.transpose(x, [
             0, 2, 1, 3]), [s0[0], s0[1], self.heads * dim])
 
@@ -146,12 +156,22 @@ class DecoderWithPositionLayer(Layer):
         # processing block a residual connection
         queries = queries + x
         queries = queries + self.block3(queries, **kwargs)
-        return [queries, values, queries_mask, values_mask, ids, permutation,
-                absolute_positions, relative_positions,
-                pointer_labels, logits_labels, 
-                partial_pos, pointer_probs, log_probs,
-                object_detections, object_features, object_boxes]
+        
+        return_args = [queries, values, queries_mask, values_mask, ids, permutation,
+            absolute_positions, relative_positions,
+            pointer_labels, logits_labels, 
+            partial_pos, pointer_probs, log_probs,
+            object_detections, object_features, object_boxes]
+        if return_scores:
+            return_args = (return_args, [scores0, scores1])
+        return return_args
 
+    def call(self, inputs, **kwargs):
+        return self.call_main(inputs, **kwargs)
+    
+    def visualize(self, inputs, **kwargs):
+        return self.call_main(inputs, return_scores=True, **kwargs)  
+    
     def get_config(self):
         """Creates a state dictionary that can be used to rebuild
         the layer in another python process

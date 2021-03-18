@@ -31,6 +31,7 @@ class PermutationTransformer(Sequential):
                  pt_relative_embedding=False,
                  temperature=1.,
                  dataset='captioning',
+                 hungarian_op_path='',
                  **kwargs):
         """Creates a Transformer Keras model for processing sequences
         and uses the tf.layers.Sequential as backend
@@ -91,7 +92,11 @@ class PermutationTransformer(Sequential):
             a positive number to divide the permutation logits by prior
             to applying sinkhorn normalization
         dataset: str
-            type of dataset"""
+            type of dataset
+        hungarian_op_path: str
+            the path to the cpu / gpu op of hungarian algorithm (for 
+            obtaining hard permutation matrices from soft permutation
+            matrices) """
 
         # TODO: Sequential does not technically support nested inputs
         layers = []
@@ -180,12 +185,13 @@ class PermutationTransformer(Sequential):
                 layers.extend([PermutationSinkhornLayer(
                     hidden_size * 4, heads,
                     queries_dropout=queries_dropout,
-                    keys_dropout=keys_dropout, **kwargs)])
+                    keys_dropout=keys_dropout, 
+                    hungarian_op_path=hungarian_op_path, **kwargs)])
             elif pg_final_layer == 'plackett':
                 layers.extend([PermutationPlackettLayer(
                     hidden_size * 4, heads,
                     queries_dropout=queries_dropout,
-                    keys_dropout=keys_dropout, **kwargs)])                
+                    keys_dropout=keys_dropout, **kwargs)])
 
         super(PermutationTransformer, self).__init__(layers)
 

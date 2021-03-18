@@ -3,12 +3,12 @@ from voi.data.load_wmt import wmt_dataset
 from voi.nn.input import TransformerInput
 from voi.nn.input import RegionFeatureInput
 from voi.algorithms.beam_search import beam_search
+from voi.algorithms.nucleus_sampling import nucleus_sampling
 from voi.permutation_utils import permutation_to_pointer
 from voi.permutation_utils import permutation_to_relative
 from voi.permutation_utils import pt_permutation_to_relative_l2r
 from voi.permutation_utils import get_permutation
 from voi.birkoff_utils import birkhoff_von_neumann
-from voi.nn.base.sinkhorn import matching
 from voi.data.tagger import load_parts_of_speech
 from voi.data.tagger import load_tagger
 from scipy import stats
@@ -76,9 +76,8 @@ def prepare_batch_for_lm_captioning(action_refinement, batch):
     Arguments:
     
     action_refinement: tf.int32
-        in policy gradient, the number of actions (permutations) to refine
-        such that we choose the one with the lowest loss
-        see https://arxiv.org/pdf/1512.07679.pdf
+        in policy gradient, the number of actions (permutations) to sample
+        per training data
     batch: dict of tf.Tensors
         a dictionary that contains tensors from a tfrecord dataset;
         this function assumes region-features are used
@@ -118,9 +117,8 @@ def prepare_batch_for_lm_wmt(action_refinement, batch):
     Arguments:
     
     action_refinement: tf.int32
-        in policy gradient, the number of actions (permutations) to refine
-        such that we choose the one with the lowest loss
-        see https://arxiv.org/pdf/1512.07679.pdf
+        in policy gradient, the number of actions (permutations) to sample
+        per training data
     batch: dict of tf.Tensors
         a dictionary that contains tensors from a tfrecord dataset;
         this function assumes region-features are used
@@ -163,9 +161,8 @@ def prepare_batch_for_pt_captioning(pretrain_done, action_refinement, batch):
     pretrain_done: tf.bool
         whether decoder pretraining has done
     action_refinement: tf.int32
-        in policy gradient, the number of actions (permutations) to refine
-        such that we choose the one with the lowest loss
-        see https://arxiv.org/pdf/1512.07679.pdf        
+        in policy gradient, the number of actions (permutations) to sample
+        per training data       
     batch: dict of tf.Tensors
         a dictionary that contains tensors from a tfrecord dataset;
         this function assumes region-features are used
@@ -210,9 +207,8 @@ def prepare_batch_for_pt_wmt(pretrain_done, action_refinement, batch):
     pretrain_done: tf.bool
         whether decoder pretraining has done
     action_refinement: tf.int32
-        in policy gradient, the number of actions (permutations) to refine
-        such that we choose the one with the lowest loss
-        see https://arxiv.org/pdf/1512.07679.pdf        
+        in policy gradient, the number of actions (permutations) to sample
+        per training data     
     batch: dict of tf.Tensors
         a dictionary that contains tensors from a tfrecord dataset;
         this function assumes region-features are used
@@ -248,7 +244,8 @@ def prepare_permutation(batch,
                         tgt_vocab_size,
                         order,
                         dataset,
-                        policy_gradient):
+                        policy_gradient,
+                        decoder=None):
     """Transform a batch dictionary into a dataclass standard format
     for the transformer to process
 
@@ -318,29 +315,35 @@ def prepare_permutation(batch,
             permu_inputs[-5] = kl
             permu_inputs[-4] = log_nom - log_denom
 
+    # pass the training example through the permutation transformer
+    # to obtain a doubly stochastic matrix
+    if order == 'sao' and decoder is not None:
+        cap, logp, rel_pos = adaptive_search(
+            inputs, decoder, dataset,
+            beam_size=8, max_iterations=200, return_rel_pos=True)
+        pos = tf.argmax(rel_pos, axis=-1, output_type=tf.int32) - 1
+        pos = tf.reduce_sum(tf.nn.relu(pos), axis=2)
+        pos = tf.one_hot(pos, tf.shape(pos)[2], dtype=tf.float32)
+        ind = tf.random.uniform([tf.shape(pos)[0], 1], maxval=7, dtype=tf.int32)
+        # todo: make sure this is not transposed
+        inputs[5] = tf.squeeze(tf.gather(pos, ind, batch_dims=1), 1)
+
     if policy_gradient == 'with_bvn':
         raise NotImplementedError
     elif policy_gradient == 'without_bvn':
         inputs[5] = tf.stop_gradient(inputs[5])
 
-    # apply the birkhoff-von neumann decomposition to support general
-    # doubly stochastic matrices
-    p, c = birkhoff_von_neumann(inputs[5], tf.constant(20))
-    c = c / tf.reduce_sum(c, axis=1, keepdims=True)
-
     # convert the permutation to absolute and relative positions
     inputs[6] = inputs[5][:, :-1, :-1]
-    inputs[7] = tf.reduce_sum(permutation_to_relative(
-        p) * c[..., tf.newaxis, tf.newaxis, tf.newaxis], axis=1)
+    inputs[7] = permutation_to_relative(inputs[5])
 
     # convert the permutation to label distributions
     # also records the partial absolute position at each decoding time step
-    hard_pointer_labels, inputs[10] = permutation_to_pointer(p)
-    inputs[8] = tf.reduce_sum(
-        hard_pointer_labels * c[..., tf.newaxis, tf.newaxis], axis=1)
+    hard_pointer_labels, inputs[10] = permutation_to_pointer(inputs[5][:, tf.newaxis, :, :])
+    inputs[8] = tf.squeeze(hard_pointer_labels, axis=1)
     inputs[9] = tf.matmul(inputs[5][
-                          :, 1:, 1:], tf.one_hot(inputs[4], tf.cast(tgt_vocab_size, tf.int32)))
-
+        :, 1:, 1:], tf.one_hot(inputs[4], tf.cast(tgt_vocab_size, tf.int32)))
+    
     return inputs, permu_inputs
 
 
@@ -423,8 +426,9 @@ def inspect_order_dataset(tfrecord_folder,
     def dummy_loss_function(b):
         # process the dataset batch dictionary into the standard
         # model input format
-        inputs, permu_inputs = prepare_permutation(b, vocabs[-1].size(),
-                                                   order, dataset_type, policy_gradient)
+        inputs, permu_inputs = prepare_permutation(
+            b, vocabs[-1].size(),
+            order, dataset_type, policy_gradient, decoder=model)
         _ = model(inputs)
         loss, inputs = model.loss(inputs, training=True)
         permu_loss = tf.zeros(tf.shape(loss)[0])
@@ -479,13 +483,29 @@ def inspect_order_dataset(tfrecord_folder,
         'Normalized Distance'])
 
     def decode_function(b):
-        # calculate the ground truth sequence for this batch; and
-        # perform beam search using the current model
-        # show several model predicted sequences and their likelihoods
+        # perform beam search using the current model and
+        # get the log probability of sequence
+        # if the order is soft (i.e. nonsequential), also return
+        # the ordering the VOI encoder predicts
+        if dataset_type == 'captioning':
+            maxit = 40
+        elif dataset_type in ['wmt', 'django']:
+            maxit = 150        
+        elif dataset_type in ['gigaword']:
+            maxit = 40        
         inputs = prepare_batch_for_lm(tf.constant(1), b)
-        cap, logp, rel_pos = beam_search(
-            inputs, model, dataset_type, beam_size=beam_size, max_iterations=50,
-            return_rel_pos=True)
+
+        # demonstration of nucleus sampler
+        cap, logp, rel_pos = nucleus_sampling(
+            inputs, model, dataset_type,
+            num_samples=beam_size, nucleus_probability=0.5,
+            max_iterations=maxit, return_rel_pos=True)
+
+        # older beam search
+        #cap, logp, rel_pos = nucleus_sampling(
+        #    inputs, model, dataset_type, num_samples=beam_size, max_iterations=maxit,
+        #    return_rel_pos=True)
+
         permu = None
         if isinstance(order, tf.keras.Model):  # corresponds to soft orderings
             if policy_gradient != 'without_bvn':
@@ -500,10 +520,12 @@ def inspect_order_dataset(tfrecord_folder,
         # distribute the model across many gpus using a strategy
         # do this by wrapping the loss function
         return strategy.run(decode_function, args=(b,))
-
-    # loop through the entire dataset once (one epoch)
+    
     if dataset_type in ['wmt', 'django', 'gigaword']:
         f = open(save_path, "w")
+    elif dataset_type == 'captioning':
+        reg, ext = save_path.split('.')
+        f = open(reg + "_sentences" + "." + ext, "w")
 
     for b_num, batch in enumerate(dataset):
         if dataset_type in ['wmt', 'django', 'gigaword']:
@@ -526,9 +548,9 @@ def inspect_order_dataset(tfrecord_folder,
             # iterate through every ground truth training example and
             # select each row from the text file
             for file_path in paths:
-                with tf.io.gfile.GFile(file_path, "r") as f:
+                with tf.io.gfile.GFile(file_path, "r") as ftmp:
                     ref_caps[file_path] = [
-                        x for x in f.read().strip().lower().split("\n")
+                        x for x in ftmp.read().strip().lower().split("\n")
                         if len(x) > 0]
 
         # process the dataset batch dictionary into the standard
@@ -542,8 +564,10 @@ def inspect_order_dataset(tfrecord_folder,
         #             cap = tf.concat(cap.values, axis=0)
         #             log_p = tf.concat(log_p.values, axis=0)
         #             rel_pos = tf.concat(rel_pos.values, axis=0)
-        for cap, log_p, rel_pos, permu in zip(caparr, logparr, relposarr, permuarr):
-
+        sum_capshape0 = 0
+        for nzip, tmp in enumerate(zip(caparr, logparr, relposarr, permuarr)):
+            cap, log_p, rel_pos, permu = tmp
+            sum_capshape0 += cap.shape[0]
             # get the absolute position because the output of decoder
             # is a list of words whose order is determined by the 
             # relative position matrix
@@ -576,22 +600,23 @@ def inspect_order_dataset(tfrecord_folder,
             # requires input to be strings; not there will be slight
             # formatting differences between ref and hyp          
             for i in range(cap.shape[0]):
-                if dataset_type == 'captioning' and paths[i] not in hyp_caps:
-                    print(i)
-                    hyp_caps[paths[i]] = cap[i, 0].decode("utf-8")
-                    gen_order_caps[paths[i]] = gen_order_cap[i, 0].decode("utf-8")
+                real_i = sum_capshape0 - cap.shape[0] + i
+                if dataset_type == 'captioning' and paths[real_i] not in hyp_caps:
+                    print("Batch ID: ", real_i, log_p.shape)
+                    hyp_caps[paths[real_i]] = cap[i, 0].decode("utf-8")
+                    gen_order_caps[paths[real_i]] = gen_order_cap[i, 0].decode("utf-8")
 
                     if isinstance(order, tf.keras.Model):
-                        print("PT Permutation:\n", permu[i].numpy())
+                        print("PT Permutation:\n", permu[i].numpy(), file=f)
                         print("Ground truth: {} | PT: {}".format(
                             tf.strings.reduce_join(
-                                vocabs[-1].ids_to_words(batch_wordids[i]),
+                                vocabs[-1].ids_to_words(batch_wordids[real_i]),
                                 separator=' ').numpy(),
                             tf.strings.reduce_join(
                                 vocabs[-1].ids_to_words(tf.squeeze(
                                     tf.matmul(tf.cast(permu[i], tf.int32),
-                                              batch_wordids[i][:, tf.newaxis]))),
-                                separator=' ').numpy()))
+                                              batch_wordids[real_i][:, tf.newaxis]))),
+                                separator=' ').numpy()), file=f)
 
                     for j in range(log_p.shape[1]):
 
@@ -599,9 +624,9 @@ def inspect_order_dataset(tfrecord_folder,
                             paths[i],
                             np.exp(log_p[i, j].numpy()),
                             cap[i, j].decode("utf-8"),
-                            gen_order_cap[i, j].decode("utf-8")))
+                            gen_order_cap[i, j].decode("utf-8")), file=f)
 
-                        print("Decoder Permutation:\n", pos[i, j].numpy())
+                        print("Decoder Permutation:\n", pos[i, j].numpy(), file=f)
 
                         # evaluate the integer order induced by the decoder model
                         indices = np.argmax(pos[i, j].numpy(), axis=0)
@@ -770,29 +795,29 @@ def inspect_order_dataset(tfrecord_folder,
                             ignore_index=True)
 
                 elif dataset_type != 'captioning':
-                    if "<unk>" not in tf.strings.reduce_join(
-                            vocabs[-1].ids_to_words(batch_wordids[i]),
-                            separator=' ').numpy().decode("utf-8"):
-                        hyp_caps_list.append(cap[i, 0].decode("utf-8"))
-                        gen_order_list.append(gen_order_cap[i, 0].decode("utf-8"))
+#                     if "<unk>" not in tf.strings.reduce_join(
+#                             vocabs[-1].ids_to_words(batch_wordids[real_i]),
+#                             separator=' ').numpy().decode("utf-8"):
+                    hyp_caps_list.append(cap[i, 0].decode("utf-8"))
+                    gen_order_list.append(gen_order_cap[i, 0].decode("utf-8"))
 
-                        if isinstance(order, tf.keras.Model):
-                            print("PT Permutation:\n", permu[i].numpy(), file=f)
-                            print("Ground truth: {} | PT: {}".format(
-                                tf.strings.reduce_join(
-                                    vocabs[-1].ids_to_words(batch_wordids[i]),
-                                    separator=' ').numpy(),
-                                tf.strings.reduce_join(
-                                    vocabs[-1].ids_to_words(tf.squeeze(
-                                        tf.matmul(tf.cast(permu[i], tf.int32),
-                                                  batch_wordids[i][:, tf.newaxis]))),
-                                    separator=' ').numpy()), file=f)
+                    if isinstance(order, tf.keras.Model):
+                        print("PT Permutation:\n", permu[i].numpy(), file=f)
+                        print("Ground truth: {} | PT: {}".format(
+                            tf.strings.reduce_join(
+                                vocabs[-1].ids_to_words(batch_wordids[real_i]),
+                                separator=' ').numpy(),
+                            tf.strings.reduce_join(
+                                vocabs[-1].ids_to_words(tf.squeeze(
+                                    tf.matmul(tf.cast(permu[i], tf.int32),
+                                              batch_wordids[real_i][:, tf.newaxis]))),
+                                separator=' ').numpy()), file=f)
 
-                        for j in range(log_p.shape[1]):
-                            print("[p = {}] {} | {}".format(np.exp(log_p[i, j].numpy()),
-                                                            cap[i, j].decode("utf-8"),
-                                                            gen_order_cap[i, j].decode("utf-8")), file=f)
-                            print("Decoder Permutation:\n", pos[i, j].numpy(), file=f)
+                    for j in range(log_p.shape[1]):
+                        print("[p = {}] {} | {}".format(np.exp(log_p[i, j].numpy()),
+                                                        cap[i, j].decode("utf-8"),
+                                                        gen_order_cap[i, j].decode("utf-8")), file=f)
+                        print("Decoder Permutation:\n", pos[i, j].numpy(), file=f)
 
     # process the logged metrics about order
 

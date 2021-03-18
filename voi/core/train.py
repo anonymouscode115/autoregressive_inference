@@ -2,6 +2,7 @@ from voi.core.sess_util import get_session
 from voi.data.load import faster_rcnn_dataset
 from voi.data.load_wmt import wmt_dataset
 from voi.algorithms.beam_search import beam_search
+from voi.algorithms.adaptive_search import adaptive_search
 from voi.birkoff_utils import birkhoff_von_neumann
 from voi.permutation_utils import permutation_to_pointer
 from voi.permutation_utils import permutation_to_relative
@@ -12,6 +13,8 @@ import tensorflow as tf
 import numpy as np
 import os
 import pickle
+import time
+import pandas as pd
 
 """inputs = (queries, values, queries_mask, values_mask, ids, permutation,
          absolute_positions, relative_positions,
@@ -52,9 +55,8 @@ def prepare_batch_for_lm_captioning(action_refinement, batch):
     Arguments:
     
     action_refinement: tf.int32
-        in policy gradient, the number of actions (permutations) to refine
-        such that we choose the one with the lowest loss
-        see https://arxiv.org/pdf/1512.07679.pdf
+        in policy gradient, the number of actions (permutations) to sample
+        per training data
     batch: dict of tf.Tensors
         a dictionary that contains tensors from a tfrecord dataset;
         this function assumes region-features are used
@@ -93,9 +95,8 @@ def prepare_batch_for_lm_wmt(action_refinement, batch):
     Arguments:
     
     action_refinement: tf.int32
-        in policy gradient, the number of actions (permutations) to refine
-        such that we choose the one with the lowest loss
-        see https://arxiv.org/pdf/1512.07679.pdf
+        in policy gradient, the number of actions (permutations) to sample
+        per training data
     batch: dict of tf.Tensors
         a dictionary that contains tensors from a tfrecord dataset;
         this function assumes region-features are used
@@ -137,9 +138,8 @@ def prepare_batch_for_pt_captioning(pretrain_done, action_refinement, batch):
     pretrain_done: tf.bool
         whether decoder pretraining has done
     action_refinement: tf.int32
-        in policy gradient, the number of actions (permutations) to refine
-        such that we choose the one with the lowest loss
-        see https://arxiv.org/pdf/1512.07679.pdf        
+        in policy gradient, the number of actions (permutations) to sample
+        per training data     
     batch: dict of tf.Tensors
         a dictionary that contains tensors from a tfrecord dataset;
         this function assumes region-features are used
@@ -183,9 +183,8 @@ def prepare_batch_for_pt_wmt(pretrain_done, action_refinement, batch):
     pretrain_done: tf.bool
         whether decoder pretraining has done
     action_refinement: tf.int32
-        in policy gradient, the number of actions (permutations) to refine
-        such that we choose the one with the lowest loss
-        see https://arxiv.org/pdf/1512.07679.pdf        
+        in policy gradient, the number of actions (permutations) to sample
+        per training data       
     batch: dict of tf.Tensors
         a dictionary that contains tensors from a tfrecord dataset;
         this function assumes region-features are used
@@ -222,7 +221,8 @@ def prepare_permutation(batch,
                         dataset,
                         policy_gradient,
                         pretrain_done,
-                        action_refinement):
+                        action_refinement,
+                        decoder=None):
     """Transform a batch dictionary into a dataclass standard format
     for the transformer to process
 
@@ -253,9 +253,8 @@ def prepare_permutation(batch,
     pretrain_done: tf.bool
         for policy gradient, whether decoder pretraining has finished
     action_refinement: tf.int32
-        in policy gradient, the number of actions (permutations) to refine
-        such that we choose the one with the lowest loss
-        see https://arxiv.org/pdf/1512.07679.pdf         
+        in policy gradient, the number of actions (permutations) to sample
+        per training data  
 
     Returns:
 
@@ -287,16 +286,29 @@ def prepare_permutation(batch,
     # to obtain a doubly stochastic matrix
     if isinstance(order, tf.keras.Model):  # corresponds to soft orderings
         if policy_gradient != 'without_bvn':
-            inputs[5] = order(prepare_batch_for_pt(pretrain_done, 
+            inputs[5] = order(prepare_batch_for_pt(pretrain_done,
                                   action_refinement, batch), training=True)
         else:
-            permu_inputs = prepare_batch_for_pt(pretrain_done, 
+            permu_inputs = prepare_batch_for_pt(pretrain_done,
                                action_refinement, batch)
             inputs[5], activations, kl, log_nom, log_denom = \
                 order(permu_inputs, training=True)
             permu_inputs[-6] = activations
             permu_inputs[-5] = kl
             permu_inputs[-4] = log_nom - log_denom
+
+    # pass the training example through the permutation transformer
+    # to obtain a doubly stochastic matrix
+    if order == 'sao' and decoder is not None:
+        cap, logp, rel_pos = adaptive_search(
+            inputs, decoder, dataset,
+            beam_size=8, max_iterations=200, return_rel_pos=True)
+        pos = tf.argmax(rel_pos, axis=-1, output_type=tf.int32) - 1
+        pos = tf.reduce_sum(tf.nn.relu(pos), axis=2)
+        pos = tf.one_hot(pos, tf.shape(pos)[2], dtype=tf.float32)
+        ind = tf.random.uniform([tf.shape(pos)[0], 1], maxval=7, dtype=tf.int32)
+        # todo: make sure this is not transposed
+        inputs[5] = tf.squeeze(tf.gather(pos, ind, batch_dims=1), 1)
 
     if policy_gradient == 'with_bvn':
         raise NotImplementedError
@@ -305,21 +317,30 @@ def prepare_permutation(batch,
         
     # apply the birkhoff-von neumann decomposition to support general
     # doubly stochastic matrices
-    p, c = birkhoff_von_neumann(inputs[5], tf.constant(20))
-    c = c / tf.reduce_sum(c, axis=1, keepdims=True)
+    #p, c = birkhoff_von_neumann(inputs[5], tf.constant(20))
+    #c = c / tf.reduce_sum(c, axis=1, keepdims=True)
 
     # convert the permutation to absolute and relative positions
     inputs[6] = inputs[5][:, :-1, :-1]
-    inputs[7] = tf.reduce_sum(permutation_to_relative(
-        p) * c[..., tf.newaxis, tf.newaxis, tf.newaxis], axis=1)
+    inputs[7] = permutation_to_relative(inputs[5])
 
     # convert the permutation to label distributions
     # also records the partial absolute position at each decoding time step
-    hard_pointer_labels, inputs[10] = permutation_to_pointer(p)
-    inputs[8] = tf.reduce_sum(
-        hard_pointer_labels * c[..., tf.newaxis, tf.newaxis], axis=1)
+    hard_pointer_labels, inputs[10] = permutation_to_pointer(inputs[5][:, tf.newaxis, :, :])
+    inputs[8] = tf.squeeze(hard_pointer_labels, axis=1)
     inputs[9] = tf.matmul(inputs[5][
         :, 1:, 1:], tf.one_hot(inputs[4], tf.cast(tgt_vocab_size, tf.int32)))
+    
+#     inputs[7] = tf.reduce_sum(permutation_to_relative(
+#         p) * c[..., tf.newaxis, tf.newaxis, tf.newaxis], axis=1)
+
+#     # convert the permutation to label distributions
+#     # also records the partial absolute position at each decoding time step
+#     hard_pointer_labels, inputs[10] = permutation_to_pointer(p)
+#     inputs[8] = tf.reduce_sum(
+#         hard_pointer_labels * c[..., tf.newaxis, tf.newaxis], axis=1)
+#     inputs[9] = tf.matmul(inputs[5][
+#         :, 1:, 1:], tf.one_hot(inputs[4], tf.cast(tgt_vocab_size, tf.int32)))
 
     return inputs, permu_inputs
 
@@ -330,6 +351,7 @@ def train_dataset(train_folder,
                   num_epoch,
                   model,
                   model_ckpt,
+                  save_interval,
                   order,
                   vocabs,
                   strategy,
@@ -341,11 +363,13 @@ def train_dataset(train_folder,
                   decoder_init_lr,
                   pt_init_lr,
                   lr_schedule,
+                  warmup,
                   kl_coeff,
                   kl_log_linear,
                   action_refinement,
                   alternate_training,
                   use_ppo,
+                  embedding_align_coeff,
                   decoder_training_scheme):
     """Trains a transformer based caption model using features extracted
     using a facter rcnn object detection model
@@ -361,19 +385,25 @@ def train_dataset(train_folder,
         single batch
     beam_size: int
         the maximum number of beams to use when decoding in a
-        single batch
+        single batch for visualization
     num_epochs: int
         the number of loops through the entire dataset to
         make before termination
-    model: Decoder
-        the caption model to be trained; an instance of Transformer that
-        returns a data class TransformerInput
+    model: Decoder i.e. tf.keras.Model
+        the decoder model to be trained that generates 
+        target sequence through insertion; implemented as Transformer-INDIGO
     model_ckpt: str
         the path to an existing model checkpoint or the path
         to be written to when training
+    save_interval: int
+        the model snapshot saving interval;
+        the snapshot is named by the # of iterations; 
+        disable if <=0; 
+        (model_name_ckpt.h5 etc still saved every 2000 iterations)
     order: str / tf.keras.Model
-        the autoregressive ordering to train Transformer-InDIGO using;
-        l2r or r2l for now, will support soft orders later
+        the type of autoregressive ordering to train;
+        either fixed ordering (e.g. L2R) specified through a string,
+        or VOI, in which case the order is tf.keras.Model
     vocabs: list of Vocabulary
         the list of model vocabularies which contains mappings
         from words to integers
@@ -381,48 +411,70 @@ def train_dataset(train_folder,
         the strategy to use when distributing a model across many gpus
         typically a Mirrored Strategy
     dataset: str
-        the type of dataset (captioning or wmt)
+        the type of dataset (captioning, django, gigaword, or wmt)
     policy_gradient: str
-        whether to use policy gradient for training
-        default: none (no policy gradient)
+        whether to use policy gradient for training;
+        this parameter is used for VOI training only
+        default: none (no policy gradient, which is necessary for
+                       fixed ordering training)
         choices: 
             with_bvn: use policy gradient with probabilities of 
                 hard permutations based on Berkhoff von Neumann decomposition
-                of soft permutation
-            without_bvn: after applying Hungarian algorithm on soft 
-                permutation to obtain hard permutations, the probabilities of hard 
+                of doubly stochastic matrix (IN PRACTICE THIS HAS NUMERICAL ISSUES SO 
+                WE HAVE DISABLED IT)
+            without_bvn: after applying the Hungarian algorithm on soft 
+                permutation from the Sinkhorn operation to obtain hard permutations, 
+                i.e. P = Hungarian(Sinkhorn((X + eps) / self.temperature)),
+                where X = q(y, x),
+                the probabilities of hard 
                 permutations are proportionally based on Gumbel-Matching distribution 
                 i.e. exp(<X,P>_F), see https://arxiv.org/abs/1802.08665) 
     reward_std: bool
-        for policy gradient, whether to standardize the reward
+        for policy gradient, whether to standardize the reward;
+        this parameter is used for VOI training only
     pg_final_layer: str
-        the type of final layer for permutation transformer if we use policy gradient; 
-        default is plackett
+        the type of final layer for permutation transformer if training VOI; 
+        default is sinkhorn;
+        this parameter is used for VOI training only    
     decoder_pretrain: int
-        decoder pretraining timesteps before start training permutation transformer
+        decoder pretraining timesteps before start training the permutation transformer;
+        this parameter is used for VOI training only
     decoder_init_lr: float
-        decoder transformer learning rate at initialization
+        decoder transformer's learning rate at initialization
     pt_init_lr: float
-        permutation transformer learning rate at initialization
+        permutation transformer's learning rate at initialization
     lr_schedule: str
         learning rate schedule: linear or constant
+    warmup: int
+        number of timesteps for linearly warming up the learning rate       
     kl_coeff: float
-        kl divergence for policy gradient training
+        kl divergence coefficient beta
+        where the loss is beta * KL((X+eps)/self.temperature || eps/temp_prior),
+        where eps is Gumbel noise;
+        this parameter is used for VOI training only
     kl_log_linear: float
-        in policy gradient, decrease the log coefficient of kl
-        linearly as training proceeds
+        if this value > 0, decrease the log coefficient of kl
+        linearly as training proceeds until this value;
+        this parameter is used for VOI training only
     action_refinement: int
-        in policy gradient, the number of actions (permutations) to refine
-        such that we choose the one with the lowest loss
-        see https://arxiv.org/pdf/1512.07679.pdf 
+        the number of actions (permutations, orderings) to sample
+        per training data;
+        this parameter is used for VOI training only        
     alternate_training: list of two ints or None
-        if alternate training, then train decoder and fix permutation transformer
-        for x iterations, and then train permutation transformer and fix decoder for 
-        y iterations
+        if alternate training is not None, 
+        then train decoder and fix permutation transformer for x iterations, 
+        and then train permutation transformer and fix decoder for y iterations
     use_ppo: bool
-        whether to use PPO for policy gradient
+        whether to use PPO;
+        this parameter is used for VOI training only
+    embedding_align_coeff: float
+        the coefficient of embedding alignment loss 
+        between the permutation transformer and the decoder;
+        this parameter is used for VOI training only    
     decoder_training_scheme: str
-        whether to train decoder with the best permutation or all sampled permutations""" 
+        whether to train decoder with the best permutation 
+        or all sampled permutations from the permutation transformer;
+        this parameter is used for VOI training only""" 
 
     if dataset == 'captioning':
         train_dataset = faster_rcnn_dataset(train_folder, batch_size)
@@ -447,13 +499,45 @@ def train_dataset(train_folder,
     elif dataset in ['wmt', 'django', 'gigaword']:
         prepare_batch_for_lm = prepare_batch_for_lm_wmt
         prepare_batch_for_pt = prepare_batch_for_pt_wmt   
-        
+    
+    # Get the number of embeddings matrices in PT and decoder
+    # In captioning, there is a detection embedding and vocab embedding
+    # In other tasks, this equals the number of vocabularies
+    def get_num_emb_matrices():
+        if dataset == 'captioning':
+            return 2
+        elif dataset in ['wmt', 'django', 'gigaword']:
+            return len(vocabs)
+    
+    num_emb_matrices = get_num_emb_matrices()
+            
+    def calc_align_loss():
+        # embedding_weights = [Mirrored{0: (27000x512), 1: (27000x512), ....}]
+        model_e = model.src_embedding.weights
+        order_e = order.src_embedding.weights
+        cos_src = tf.reduce_sum(tf.math.multiply(model_e, order_e), 
+                    axis=-1) / (tf.linalg.norm(model_e, axis=-1)
+                                * tf.linalg.norm(order_e, axis=-1))
+        cos_src = tf.reduce_mean(cos_src)
+        if num_emb_matrices == 1:
+            return 2.0 * (1 - cos_src)
+        elif num_emb_matrices == 2:
+            model_e = model.tgt_embedding.weights
+            order_e = order.tgt_embedding.weights
+            cos_tgt = tf.reduce_sum(tf.math.multiply(model_e, order_e), 
+                        axis=-1) / (tf.linalg.norm(model_e, axis=-1)
+                                    * tf.linalg.norm(order_e, axis=-1)) 
+            cos_tgt = tf.reduce_mean(cos_tgt)
+            return (1 - cos_src) + (1 - cos_tgt)
+                                     
+            
     def loss_function(pretrain_done, kl_coeff, b):
         # process the dataset batch dictionary into the standard
         # model input format
-        inputs, permu_inputs = prepare_permutation(b, vocabs[-1].size(), 
-                        order, dataset, policy_gradient, 
-                        pretrain_done, tf.constant(action_refinement))
+        inputs, permu_inputs = prepare_permutation(
+            b, vocabs[-1].size(),
+            order, dataset, policy_gradient,
+            pretrain_done, tf.constant(action_refinement), decoder=model)
         loss, inputs = model.loss(inputs, training=True)
         if dataset == 'captioning':
             token_ind = b['token_indicators']
@@ -489,15 +573,16 @@ def train_dataset(train_folder,
             # without policy gradient or policy gradient + BvN
             # + stick breaking (unimplemented)
             permu_loss = tf.zeros(tf.shape(loss)[0])
+            align_loss = tf.zeros(tf.shape(loss)[0])
         else:
             # sinkhorn permutation marginal inference
 
-            tf.print("reward:", -loss_with_refinement, summarize=-1)
+            #tf.print("reward:", -loss_with_refinement, summarize=-1)
             reward_baseline = tf.reduce_mean(-reshaped_loss, axis=1)
             std_baseline = tf.math.reduce_std(-reshaped_loss, axis=1) + 1e-8
             reward_baseline = tf.repeat(reward_baseline, action_refinement, axis=0)
             std_baseline = tf.repeat(std_baseline, action_refinement, axis=0)
-            tf.print("reward_baseline:", reward_baseline, summarize=-1)    
+            #tf.print("reward_baseline:", reward_baseline, summarize=-1)
             if reward_std:
                 advantage = (tf.stop_gradient(-loss_with_refinement) - tf.stop_gradient(reward_baseline)) / \
                                 tf.maximum(tf.stop_gradient(std_baseline), 1.0)
@@ -507,21 +592,25 @@ def train_dataset(train_folder,
             advantage = tf.reshape(advantage, [-1, 1])
     
             log_potential = permu_inputs[-4]        
-            for idx in tf.range(3):
+            for idx in range(3):
                 locs = tf.where(inputs[5][idx] == 1.0)
                 d2 = tf.shape(locs)[1]
                 locs = tf.reshape(locs, [locs[-1,0]+1, d2])
                 tf.print("Sampled 3 permutations:",
-                         locs[:, -1], "\n", summarize=-1)
+                        locs[:, -1], "\n", summarize=-1)
 
             log_potentials = log_potential
             advantages = advantage
             kls = permu_inputs[-5]
 #             kls = tf.math.maximum(kls - 10.0, 0.0)
 #             kls = kls ** 2
-            tf.print("log_potentials", tf.squeeze(log_potentials), summarize=-1)
-            tf.print("advantages", tf.squeeze(advantages), summarize=-1)
-            permu_loss = -tf.reduce_mean(log_potentials * advantages - kl_coeff * kls, axis=1) \
+            #tf.print("log_potentials", tf.squeeze(log_potentials), summarize=-1)
+            #tf.print("advantages", tf.squeeze(advantages), summarize=-1)
+            permu_loss = -tf.reduce_mean(log_potentials * advantages - kl_coeff * kls, axis=1)
+            align_loss = calc_align_loss()
+            #tf.print("align loss", align_loss, summarize=-1)
+            align_loss = embedding_align_coeff * align_loss * tf.ones_like(permu_loss)
+                
         
         if decoder_training_scheme == 'best':
             # tf.dynamic_partition bug not resolved yet in tf 2.3
@@ -536,10 +625,11 @@ def train_dataset(train_folder,
             bs = bs * action_refinement
             
         if policy_gradient != 'without_bvn':
-            return tf.nn.compute_average_loss(loss, global_batch_size=bs), permu_loss, None, None, None
+            return tf.nn.compute_average_loss(loss, global_batch_size=bs), permu_loss, align_loss, None, None, None
         else:
             return tf.nn.compute_average_loss(loss, global_batch_size=bs), \
                    tf.nn.compute_average_loss(permu_loss, global_batch_size=batch_size*action_refinement), \
+                   tf.nn.compute_average_loss(align_loss, global_batch_size=batch_size*action_refinement), \
                    sampled_permus, tf.stop_gradient(log_potentials), advantages
 
     #@tf.function
@@ -591,25 +681,26 @@ def train_dataset(train_folder,
             ratio = tf.math.exp(log_nominator - log_potentials)
         reward = tf.math.minimum(ratio * advantages, 
                                  tf.clip_by_value(ratio, 0.9, 1.1) * advantages)
-        tf.print("action prob ratio", tf.squeeze(ratio), summarize=-1)
+        #tf.print("action prob ratio", tf.squeeze(ratio), summarize=-1)
         permu_loss = tf.squeeze(-reward + kl_coeff * kl)            
         return tf.nn.compute_average_loss(permu_loss, global_batch_size=batch_size*action_refinement)
-        
-    #@tf.function(input_signature=[train_dataset.element_spec])
-    def wrapped_loss_function(b):
-        # distribute the model across many gpus using a strategy
-        # do this by wrapping the loss function using data parallelism
-        loss, permu_loss, _, _, _ = strategy.run(loss_function, 
-                                                 args=(True, tf.constant(kl_coeff), b,))
-        return strategy.reduce(
-            tf.distribute.ReduceOp.SUM, loss, axis=None)
     
     def dummy_loss_function(b):
         # process the dataset batch dictionary into the standard
         # model input format
-        inputs, permu_inputs = prepare_permutation(b, vocabs[-1].size(), 
-                        order, dataset, policy_gradient, 
-                        tf.constant(True), tf.constant(action_refinement))
+        inputs, permu_inputs = prepare_permutation(
+            b, vocabs[-1].size(),
+            'l2r' if order == 'sao' else order, dataset, policy_gradient,
+            tf.constant(True), tf.constant(action_refinement), decoder=model)
+        # The "call" function of the decoder is a dummy function. 
+        # During training, we invoke model.loss, which sums the 
+        # returned loss across all submodules;
+        # During testing, we invoke model.beam_search, which 
+        # invokes the beam search function on all submodules;
+        # Thus the "call" function of the decoder is only used to 
+        # build the parameters and is only called once
+        # (it invokes all the "call" functions of submodules, which 
+        # is required for tf.keras to know the parameters of the model).
         _ = model(inputs)
         loss, inputs = model.loss(inputs, training=True)
 
@@ -636,8 +727,8 @@ def train_dataset(train_folder,
         wrapped_dummy_loss_function(batch)
         break
 
-    print("----------Done defining weights of model-----------")
-    
+    print("----------Done initializing (but not loading) the weights of the model-----------")
+
     def decode_function(b):
         # calculate the ground truth sequence for this batch; and
         # perform beam search using the current model
@@ -719,35 +810,40 @@ def train_dataset(train_folder,
         
     def step_function_no_pg(pretrain_done, kl_coeff, b):
         with tf.GradientTape(persistent=True) as tape:
-            loss, _, _, _, _ = loss_function(pretrain_done, kl_coeff, b)            
+            loss, _, _, _, _, _ = loss_function(pretrain_done, kl_coeff, b)            
         grads = tape.gradient(loss, vars + pt_vars)
         optim.apply_gradients(list(zip(grads[:len(vars)], vars)))
         pt_optim.apply_gradients(list(zip(grads[len(vars):], pt_vars)))
-        tf.print("optim.lr", optim.lr)
+        #tf.print("optim.lr", optim.lr)
         del tape
         return loss
         
     def step_function_normal_pg(pretrain_done, kl_coeff, b):
         # performing a gradient descent step on a batch of data
         with tf.GradientTape(persistent=True) as tape:
-            loss, permu_loss, sampled_permus, log_potentials, advantages \
+            loss, permu_loss, align_loss, sampled_permus, log_potentials, advantages \
                 = loss_function(pretrain_done, kl_coeff, b) 
         grads = tape.gradient(loss, vars)
         optim.apply_gradients(list(zip(grads, vars)))
-        tf.print("optim.lr", optim.lr, "pt_optim.lr", pt_optim.lr)
+        #tf.print("optim.lr", optim.lr, "pt_optim.lr", pt_optim.lr)
         grads = tape.gradient(permu_loss, pt_vars)
-        pt_optim.apply_gradients(list(zip(grads, pt_vars)))  
+        pt_optim.apply_gradients(list(zip(grads, pt_vars)))
+        grads = tape.gradient(align_loss, pt_vars[:num_emb_matrices])
+        pt_optim.apply_gradients(list(zip(grads, pt_vars[:num_emb_matrices])))  
         del tape
         return loss
     
     def step_function_ppo_pg(pretrain_done, kl_coeff, b):
         # performing a gradient descent step on a batch of data
-        with tf.GradientTape() as tape:
-            loss, permu_loss, sampled_permus, log_potentials, advantages \
+        with tf.GradientTape(persistent=True) as tape:
+            loss, permu_loss, align_loss, sampled_permus, log_potentials, advantages \
                 = loss_function(pretrain_done, kl_coeff, b) 
         grads = tape.gradient(loss, vars)
         optim.apply_gradients(list(zip(grads, vars)))
-        tf.print("optim.lr", optim.lr, "pt_optim.lr", pt_optim.lr)
+        grads = tape.gradient(align_loss, pt_vars[:num_emb_matrices])
+        pt_optim.apply_gradients(list(zip(grads, pt_vars[:num_emb_matrices])))
+        del tape
+        #tf.print("optim.lr", optim.lr, "pt_optim.lr", pt_optim.lr)
         for _ in range(3):
             with tf.GradientTape() as tape:
                 permu_loss =  pg_loss_function(pretrain_done, kl_coeff, sampled_permus, 
@@ -761,28 +857,33 @@ def train_dataset(train_folder,
     def step_function_decoderonly(pretrain_done, kl_coeff, b):
         # performing a gradient descent step on a batch of data
         with tf.GradientTape() as tape:
-            loss, permu_loss, sampled_permus, log_potentials, advantages \
+            loss, permu_loss, align_loss, sampled_permus, log_potentials, advantages \
                 = loss_function(pretrain_done, kl_coeff, b)
         grads = tape.gradient(loss, vars)
         optim.apply_gradients(list(zip(grads, vars)))      
-        tf.print("training decoder only: optim.lr", optim.lr)
+        #tf.print("training decoder only: optim.lr", optim.lr)
         return loss    
     
     def step_function_ptonly_normal(pretrain_done, kl_coeff, b):
         # performing a gradient descent step on a batch of data
-        with tf.GradientTape() as tape:
-            loss, permu_loss, sampled_permus, log_potentials, advantages \
+        with tf.GradientTape(persistent=True) as tape:
+            loss, permu_loss, align_loss, sampled_permus, log_potentials, advantages \
                 = loss_function(pretrain_done, kl_coeff, b)
         grads = tape.gradient(permu_loss, pt_vars)
-        pt_optim.apply_gradients(list(zip(grads, pt_vars)))
-        tf.print("training permutation only: pt_optim.lr", pt_optim.lr)
+        pt_optim.apply_gradients(list(zip(grads, pt_vars)))  
+        grads = tape.gradient(align_loss, pt_vars[:num_emb_matrices])
+        pt_optim.apply_gradients(list(zip(grads, pt_vars[:num_emb_matrices])))
+        #tf.print("training permutation only: pt_optim.lr", pt_optim.lr)
         return loss        
     
     def step_function_ptonly_ppo(pretrain_done, kl_coeff, b):
         # performing a gradient descent step on a batch of data
         with tf.GradientTape() as tape:
-            loss, permu_loss, sampled_permus, log_potentials, advantages \
+            loss, permu_loss, align_loss, sampled_permus, log_potentials, advantages \
                 = loss_function(pretrain_done, kl_coeff, b)
+        grads = tape.gradient(align_loss, pt_vars[:num_emb_matrices])
+        pt_optim.apply_gradients(list(zip(grads, pt_vars[:num_emb_matrices])))
+        del tape
         for _ in range(3):
             with tf.GradientTape() as tape:
                 permu_loss =  pg_loss_function(pretrain_done, kl_coeff, sampled_permus, 
@@ -790,7 +891,7 @@ def train_dataset(train_folder,
             grads = tape.gradient(permu_loss, pt_vars)
             pt_optim.apply_gradients(list(zip(grads, pt_vars)))                
                 
-        tf.print("training permutation only: pt_optim.lr", pt_optim.lr)
+        #tf.print("training permutation only: pt_optim.lr", pt_optim.lr)
         return loss            
 
     if policy_gradient != 'without_bvn':
@@ -810,7 +911,7 @@ def train_dataset(train_folder,
         result = strategy.run(step_function, args=(pretrain_done, kl_coeff, b))
         return strategy.reduce(
             tf.distribute.ReduceOp.SUM, result, axis=None)
-    
+
     @tf.function(input_signature=[tf.TensorSpec(shape=None, dtype=tf.bool),
                                   tf.TensorSpec(shape=None, dtype=tf.float32),
                                   train_dataset.element_spec])     
@@ -821,7 +922,7 @@ def train_dataset(train_folder,
                               args=(pretrain_done, kl_coeff, b))
         return strategy.reduce(
             tf.distribute.ReduceOp.SUM, result, axis=None)    
-    
+
     @tf.function(input_signature=[tf.TensorSpec(shape=None, dtype=tf.bool),
                                   tf.TensorSpec(shape=None, dtype=tf.float32),
                                   train_dataset.element_spec])     
@@ -832,7 +933,7 @@ def train_dataset(train_folder,
                               args=(pretrain_done, kl_coeff, b))        
         return strategy.reduce(
             tf.distribute.ReduceOp.SUM, result, axis=None)        
-    
+
     @tf.function(input_signature=[tf.TensorSpec(shape=None, dtype=tf.bool),
                                   tf.TensorSpec(shape=None, dtype=tf.float32),
                                   train_dataset.element_spec])     
@@ -856,10 +957,6 @@ def train_dataset(train_folder,
     step_freqs = alternate_training
     step_mode = 0
     cur_step_count = 0
-    
-    kl_final = kl_log_linear
-    log_kl_start = np.log(kl_coeff)
-    log_kl_end = np.log(kl_final)
     
     if dataset == 'captioning':
         maxlength = 45
@@ -885,28 +982,49 @@ def train_dataset(train_folder,
             with open(model_ckpt[:-3] + "_pt_optim.obj", "wb") as f:
                 pickle.dump(weight_values, f)        
                 
+    # dataset size
+    if dataset == 'gigaword':
+        d_size = 3803897
+    elif dataset == 'wmt':
+        d_size = 609324
+    elif dataset == 'captioning':
+        d_size = 591435
+    elif dataset == 'django':
+        d_size = 16000
+
+    # create data frames for global sequence-level statistics
+    training_time_df = pd.DataFrame(columns=[
+        'Model',
+        'Type',
+        'Time'])
+        
         
     for epoch in range(num_epoch):
+        dist_it = iter(train_dataset)
         def get_cur_lr(lr):
-            if lr_schedule == 'constant':
-                return lr
+            if iteration + 1 < warmup:
+                return lr * (iteration + 1) / max(warmup, 1)
             else:
-                if dataset in ['captioning', 'wmt', 'django']:
-                    return lr * (num_epoch - epoch) / num_epoch
-                elif dataset == 'gigaword':
-                    return lr * (200000 - min(iteration + 1, 200000)) / 200000
-            
-        optim.lr.assign(get_cur_lr(init_lr))
-        pt_optim.lr.assign(get_cur_lr(pt_init_lr))
+                if lr_schedule == 'constant':
+                    return lr
+                elif lr_schedule == 'linear':
+                    g_its = num_epoch * d_size / batch_size - warmup
+                    return lr * (g_its - min(iteration - warmup + 1, g_its)) / g_its
         
-        if kl_log_linear > 0:
-            if dataset == 'gigaword':
-                kl_coeff = log_kl_start + (log_kl_end - log_kl_start) * min(iteration + 1, 199999) / (200000 - 1)
-            else:
-                kl_coeff = log_kl_start + (log_kl_end - log_kl_start) * epoch / (num_epoch - 1)
-            kl_coeff = np.exp(kl_coeff).astype(np.float32)
         # loop through the entire dataset once (one epoch)
         for batch in train_dataset:
+            if kl_log_linear > 0:
+                log_kl_start = np.log(kl_coeff)
+                log_kl_end = np.log(kl_log_linear)                
+                if dataset in ['gigaword', 'wmt', 'django', 'captioning']:
+                    g_its = num_epoch * d_size / batch_size
+                    kl_coeff = log_kl_start + (log_kl_end - log_kl_start) * min(iteration + 1, g_its) / g_its            
+                else:
+                    kl_coeff = log_kl_start + (log_kl_end - log_kl_start) * epoch / (num_epoch - 1)
+                kl_coeff = np.exp(kl_coeff).astype(np.float32)
+                print("Current kl", kl_coeff)
+            optim.lr.assign(get_cur_lr(init_lr))
+            pt_optim.lr.assign(get_cur_lr(pt_init_lr))
             if dataset == 'captioning':
                 words = batch["words"]
             elif dataset in ['wmt', 'django', 'gigaword']:
@@ -920,19 +1038,20 @@ def train_dataset(train_folder,
                 continue                
             iteration += 1
             cur_step_count += 1
-                        
+
             # to load optimizer state, run a dummy iteration
             # so that the optimizers are tracking the correct
             # number of parameters  
             if iteration == 0 and tf.io.gfile.exists(modified_ckpt):    
                 optim.lr.assign(0.0)
                 pt_optim.lr.assign(0.0)
-                
+
             if iteration <= decoder_pretrain:
                 pt_optim.lr.assign(0.0)
             elif iteration > 0:
                 pt_optim.lr.assign(get_cur_lr(pt_init_lr))
-                
+
+            start_time = time.time()
             if not alternate_training:
                 wsf = wrapped_step_function
             else:
@@ -940,19 +1059,28 @@ def train_dataset(train_folder,
             print("It: {} Train Loss: {}".format(
                 iteration, wsf(tf.constant(
                     iteration > decoder_pretrain), tf.constant(kl_coeff), batch)))
-            
+            end_time = time.time()
+
+            if iteration > 0:
+                training_time_df = training_time_df.append({
+                    "Model": model_ckpt,
+                    "Type": order.upper() if isinstance(order, str) else "VOI",
+                    'Word': end_time - start_time},
+                    ignore_index=True)
+                training_time_df.to_csv(f'{model_ckpt}_training_time_df.csv')
+
             # if alternate training, check whether to change step mode
             if alternate_training and cur_step_count >= step_freqs[step_mode]:
                 step_mode = 1 - step_mode
                 cur_step_count = 0
-            
-            # save every 2k training steps
+
+            # save every 2k training steps (not a separate model snapshot)
             if iteration > 0 and iteration % 2000 == 0:
                 save_weights(model_ckpt[:-3] + "_ckpt.h5") 
-                
+
             if iteration % 100 == 0:
                 wrapped_decode_function(batch)
-                
+
             if iteration == 0 and tf.io.gfile.exists(modified_ckpt):   
                 if os.path.exists(model_ckpt[:-3] + "_ckpt_optim.obj"):
                     with open(model_ckpt[:-3] + "_ckpt_optim.obj", "rb") as f:
@@ -968,10 +1096,8 @@ def train_dataset(train_folder,
                 optim.lr.assign(get_cur_lr(init_lr))
             if iteration == 0:
                 save_weights(model_ckpt[:-3] + "_init.h5")
-            if iteration % 10000 == 0 and iteration > 0 and dataset == 'gigaword':
-                save_weights(model_ckpt[:-3] + "_iteration{}.h5".format(iteration))                  
-
+            if save_interval > 0 and iteration % save_interval == 0 and iteration > 0:
+                save_weights(model_ckpt[:-3] + "_iteration{}.h5".format(iteration))
+        
         # save the model at the current epoch
-        save_weights(model_ckpt[:-3] + "_ckpt.h5")                
-        if epoch % 5 == 0 and dataset != 'gigaword':
-            save_weights(model_ckpt[:-3] + "_epoch{}.h5".format(epoch))  
+        save_weights(model_ckpt[:-3] + "_ckpt.h5")

@@ -6,7 +6,6 @@ from voi.permutation_utils import pt_permutation_to_relative_l2r
 from voi.nn.position_encoding import position_encoding_relative
 import tensorflow as tf
 
-""" This layer is only for Permutation transformer"""
 class DecoderWithPositionalAttentionLayer(Layer):
 
     def __init__(self,
@@ -18,8 +17,11 @@ class DecoderWithPositionalAttentionLayer(Layer):
                  values_dropout=0.,
                  causal=True,
                  **kwargs):
-        """Creates a Transformer decoder layer by applying a
-        multi head attention layer
+        """
+        Relative positional attention as in 
+        https://arxiv.org/pdf/1901.02860.pdf
+        
+        This layer is only used in Permutation transformer
 
         Arguments:
 
@@ -81,7 +83,7 @@ class DecoderWithPositionalAttentionLayer(Layer):
         self.causal = causal
         self.kwargs = kwargs
 
-    def call(self, inputs, **kwargs):
+    def call_main(self, inputs, return_scores=False, **kwargs):
         """Runs a forward pass on a multi head attention layer
         inputs is an instance of TransformerInput
 
@@ -90,6 +92,8 @@ class DecoderWithPositionalAttentionLayer(Layer):
         inputs: TransformerInput
             a dataclass instance that contains queries, keys
             and values along with masks
+        return_scores: bool
+            whether to return attention scores            
 
         Returns:
 
@@ -108,8 +112,7 @@ class DecoderWithPositionalAttentionLayer(Layer):
         s0, s1 = tf.shape(queries), tf.shape(values)
         dim = self.input_size // self.heads
 
-        # pass the input through a feed forward processing block and
-        # separate heads from channels
+        # decoder self-attention with relative-positional encodings as in Transformer-XL
         rel = pt_permutation_to_relative_l2r(1, s0[1], tf.constant(self.relative_length)) #one_hot
         rel = tf.matmul(rel, self.relative_encoding) # (1, shape[1], shape[1], input_size)
         
@@ -138,29 +141,32 @@ class DecoderWithPositionalAttentionLayer(Layer):
         # pass the input through an attention processing block and
         # flatten the heads and channels
         mask0 = tf.expand_dims(queries_mask, 1)
-        x = self.attention0([new_q, new_ke, new_kv,
-                             mask0, mask0, bias], **kwargs)
+        if not return_scores:
+            x = self.attention0([new_q, new_ke, new_kv,
+                                mask0, mask0, bias], **kwargs)                            
+        else:
+            x, scores = self.attention0([new_q, new_ke, new_kv,
+                                mask0, mask0, bias], return_scores=True, **kwargs)
         x = tf.reshape(tf.transpose(x, [
             0, 2, 1, 3]), [s0[0], s0[1], self.heads * dim])
 
-        # pass the input through a feed forward processing block and
-        # separate heads from channels
+        # encoder-decoder cross attention
         queries = queries + x
         y = self.block1(queries, **kwargs)
         y = tf.transpose(tf.reshape(y, [
             s0[0], s0[1], self.heads, dim]), [0, 2, 1, 3])
 
-        # pass the input through a feed forward processing block and
-        # separate heads from channels
         x = self.block2(values, **kwargs)
         x = tf.transpose(tf.reshape(x, [
             s1[0], s1[1], self.heads, dim * 2]), [0, 2, 1, 3])
 
-        # pass the input through an attention processing block and
-        # flatten the heads and channels
         mask1 = tf.expand_dims(values_mask, 1)
-        x = self.attention1([y, x[..., :dim], x[..., dim:],
-                             mask0, mask1], **kwargs)
+        if not return_scores:
+            x = self.attention1([y, x[..., :dim], x[..., dim:],
+                                 mask0, mask1], **kwargs)
+        else:
+            x, scores1 = self.attention1([y, x[..., :dim], x[..., dim:],
+                                          mask0, mask1], return_scores=True, **kwargs)
         x = tf.reshape(tf.transpose(x, [
             0, 2, 1, 3]), [s0[0], s0[1], self.heads * dim])
 
@@ -168,11 +174,20 @@ class DecoderWithPositionalAttentionLayer(Layer):
         # processing block a residual connection
         queries = queries + x
         queries = queries + self.block3(queries, **kwargs)
-        return [queries, values, queries_mask, values_mask, ids, permutation,
-                absolute_positions, relative_positions,
-                pointer_labels, logits_labels, 
-                partial_pos, pointer_probs, log_probs,
-                object_detections, object_features, object_boxes]
+        return_args = [queries, values, queries_mask, values_mask, ids, permutation,
+            absolute_positions, relative_positions,
+            pointer_labels, logits_labels, 
+            partial_pos, pointer_probs, log_probs,
+            object_detections, object_features, object_boxes]
+        if return_scores:
+            return_args = (return_args, [scores0, scores1])
+        return return_args
+
+    def call(self, inputs, **kwargs):
+        return self.call_main(inputs, **kwargs)
+    
+    def visualize(self, inputs, **kwargs):
+        return self.call_main(inputs, return_scores=True, **kwargs)  
 
     def get_config(self):
         """Creates a state dictionary that can be used to rebuild

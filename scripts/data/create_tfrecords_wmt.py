@@ -10,7 +10,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--feature_folder', type=str, default='/home/wmt/train_en_de/')
     parser.add_argument(
-        '--dataset_type', type=str, default='validation', choices=['train', 'validation', 'test'])    
+        '--dataset_type', type=str, default='validation', choices=['train', 'validation', 'test', 'distillation'])    
     parser.add_argument(
         '--samples_per_shard', type=int, default=4096)
     args = parser.parse_args()

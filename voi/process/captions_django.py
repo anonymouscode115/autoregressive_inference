@@ -72,30 +72,6 @@ def process_django(out_feature_folder,
     all_tgt_words = []
 
     # parse the entire set of captions
-
-#     while True:
-#         src = src_file.readline()
-#         tgt = tgt_file.readline()
-#         if not src:
-#             break
-#         src = src.strip()
-#         tgt = tgt.strip()
-#         if src[-1] == '\n':
-#             src = src[:-1]
-#         if tgt[-1] == '\n':
-#             tgt = tgt[:-1]
-#         src_list = src.split(' ')
-#         tgt_list = tgt.split(' ')
-
-#         for w in src_list:
-#             freq[w] += 1
-#             src_freq[w] += 1
-#         for w in tgt_list:
-#             freq[w] += 1
-#             tgt_freq[w] += 1
-
-#         all_src_words.extend([src_list])
-#         all_tgt_words.extend([tgt_list])
     while True:
         src = src_file.readline()
         tgt = tgt_file.readline()
@@ -104,7 +80,7 @@ def process_django(out_feature_folder,
         src = src.strip()
         tgt = tgt.strip()
 #         if "\\n" in tgt:
-#             tgt = tgt.replace("\\n", " _newline_ ")
+#             tgt = tgt.replace("\\n", " _newline_ ") # can't do this because of cases like "self . stream . write ( b'\n' )"
         src = re.sub(' +',' ',src)
         tgt = re.sub(' +',' ',tgt)
         src_list = src.split(' ')
@@ -143,8 +119,10 @@ def process_django(out_feature_folder,
                 vocab = [x.strip() for x in f.readlines()]
         return Vocabulary(vocab, unknown_word="<unk>", unknown_id=1)
 
-    #vocab = create_vocab_file(freq, min_word_frequency, vocab_file)
     if not one_vocab:
+        print("""Warning: you are creating two separate vocab files for source and target data;
+                 however, currently training only implements using one single vocab for source
+                 and target (as this saves memory). """)        
         src_vocab = create_vocab_file(src_freq, min_word_frequency, 
                                      os.path.dirname(vocab_file) + "/src_" + os.path.basename(vocab_file))
         tgt_vocab = create_vocab_file(tgt_freq, min_word_frequency, 

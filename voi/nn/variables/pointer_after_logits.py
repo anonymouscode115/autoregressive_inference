@@ -97,9 +97,9 @@ class PointerAfterLogits(Pointer):
         k = tf.reshape(features[..., self.output_size:], shape)
         size = tf.math.sqrt(tf.cast(tf.shape(q)[2], tf.float32))
         
-        # reorder keys such that inserting to the left corresponds to 
+        # Reorder keys such that inserting to the left corresponds to 
         # matmul with the (projected) hidden vector of the left token 
-        # in absolute position, and similar does inserting to the right
+        # in absolute position. Similar does inserting to the right
         valid_range = tf.range(tf.shape(partial_pos)[-1]) + 1
         valid_range = valid_range[tf.newaxis, tf.newaxis, :, tf.newaxis]
         target_left = tf.math.floormod(partial_pos - 1, valid_range)
@@ -109,17 +109,26 @@ class PointerAfterLogits(Pointer):
         partial_pos = tf.where(mask, partial_pos, 999999)
         target_left = tf.where(mask, target_left, 999999)
         target_right = tf.where(mask, target_right, 999999)
-        target_left = tf.math.argmin(tf.abs(partial_pos[:, :, :, tf.newaxis, :] \
-                                 - target_left[:, :, :, :, tf.newaxis]), axis=-1,
-                                 output_type=tf.int32)             
-        target_right = tf.math.argmin(tf.abs(partial_pos[:, :, :, tf.newaxis, :] \
-                                 - target_right[:, :, :, :, tf.newaxis]), axis=-1,
-                                 output_type=tf.int32)  
+        target_left = tf.math.argmin(
+            tf.abs(partial_pos[:, :, :, tf.newaxis, :]
+                   - target_left[:, :, :, :, tf.newaxis]
+                  ), 
+            axis=-1,
+            output_type=tf.int32
+        )             
+        target_right = tf.math.argmin(
+            tf.abs(partial_pos[:, :, :, tf.newaxis, :]
+                   - target_right[:, :, :, :, tf.newaxis]
+                  ), 
+            axis=-1,
+            output_type=tf.int32
+        )  
         
         # calculate raw logit for scores and reorder according to target_left and 
         # target_right
         raw_logits = tf.matmul(q, k, transpose_b=True) / size
         #tf.print("raw_logits", tf.transpose(raw_logits[0][:,:6], [0,1]), summarize=-1)
+        
         # prevent the permutation matrix from assigning mass to
         # out of bounds elements
         mask = tf.logical_and(tf.expand_dims(queries_mask, 2),
@@ -131,9 +140,13 @@ class PointerAfterLogits(Pointer):
         # filter by removing logits for elements that are invalid
         # mask must be repeated to correct the shape
         mask = tf.repeat(mask, self.logits_per_slot, axis=2)
-        return tf.where(
-            mask, raw_logits, tf.fill(tf.shape(raw_logits), -999999.)), \
-            target_left, target_right
+        return (
+            tf.where(mask, raw_logits, 
+                     tf.fill(tf.shape(raw_logits), -999999.)
+                    ),
+            target_left, 
+            target_right
+        )
 
     def get_config(self):
         """Creates a state dictionary that can be used to rebuild

@@ -68,7 +68,7 @@ class Attention(tf.keras.layers.Layer):
         self.values_dropout_rate = values_dropout
         self.causal = causal
 
-    def call(self, inputs, **kwargs):
+    def call(self, inputs, return_scores=False, **kwargs):
         """Runs a forward pass on a multi head attention layer
         inputs is an instance of AttentionInput
 
@@ -111,8 +111,12 @@ class Attention(tf.keras.layers.Layer):
 
         # mask the output sequence where appropriate
         outputs = tf.matmul(scores, values)
-        return tf.where(tf.expand_dims(queries_mask, -1),
-                        outputs, tf.zeros_like(outputs))
+        if return_scores:
+            return tf.where(tf.expand_dims(queries_mask, -1),
+                            outputs, tf.zeros_like(outputs)), scores
+        else:
+            return tf.where(tf.expand_dims(queries_mask, -1),
+                            outputs, tf.zeros_like(outputs))
 
     def get_config(self):
         """Creates a state dictionary that can be used to rebuild

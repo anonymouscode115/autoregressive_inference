@@ -38,7 +38,10 @@ if __name__ == "__main__":
     parser.add_argument(
         '--decoder_pos_embedding', type=bool, default="False")
     parser.add_argument(
-        '--save_path', type=str, default='')    
+        '--save_path', type=str, default='', 
+        help="""save path for ground truth & model output (ref_caps_list.txt and hyp_caps_list.txt) 
+                these two files are aligned through line number
+                useless if we are validating coco, which has multiple references""")    
     args = parser.parse_args()
     args.decoder_pos_embedding = (args.decoder_pos_embedding == "True")
     
