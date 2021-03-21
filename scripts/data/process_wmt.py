@@ -1,4 +1,4 @@
-from voi.process.captions_wmt import process_wmt
+from voi.process.wmt import process_wmt
 import argparse
 
 

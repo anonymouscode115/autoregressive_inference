@@ -1,5 +1,7 @@
 # Discovering Autoregressive Orderings with Variational Inference
 
+## Note: We are currently in the process of finalizing our ICLR camera ready version and arxiving our paper. We expect to release an updated version of code and the pretrained models along with many more results by early Apr, 2021.
+
 ## Description
 
 This package contains the source code implementation of the paper "Discovering Autoregressive Orderings with Variational Inference".
@@ -79,7 +81,7 @@ python scripts/data/extract_coco.py --out_caption_folder ~/captions_train2017 --
 python scripts/data/extract_coco.py --out_caption_folder ~/captions_val2017 --annotations_file ~/annotations/captions_val2017.json
 ```
 
-Process the COCO 2017 captions and extract integer features on which to train a non sequential model. There are again several arguments that you can specify to control how the captions are processed. You may leave all arguments as default except `out_feature_folder` and `in_folder`, which depend on where you extracted the COCO dataset in the previous step.
+Process the COCO 2017 captions and extract integer features on which to train a non sequential model. There are again several arguments that you can specify to control how the captions are processed. You may leave all arguments as default except `out_feature_folder` and `in_folder`, which depend on where you extracted the COCO dataset in the previous step. Note that if `vocab_file` doesn't exist before, it will be automatically generated. Since we have provided the `train2017_vocab.txt` we used to train our model, this vocab file will be directly loaded to create integer representations of tokens.
 
 ```bash
 python scripts/data/process_captions.py --out_feature_folder ~/captions_train2017_features --in_folder ~/captions_train2017 \
@@ -98,9 +100,9 @@ python scripts/data/process_images.py --out_feature_folder ~/val2017_features --
 Finally, convert the processed features into a TFRecord format for efficient training. Record where you have extracted the COCO dataset in the previous steps and specify `out_tfrecord_folder`, `caption_folder` and `image_folder` at the minimum.
 
 ```bash
-python scripts/data/create_tfrecords.py --out_tfrecord_folder ~/train2017_tfrecords \
+python scripts/data/create_tfrecords_captioning.py --out_tfrecord_folder ~/train2017_tfrecords \
 --caption_folder ~/captions_train2017_features --image_folder ~/train2017_features --samples_per_shard 4096
-python scripts/data/create_tfrecords.py --out_tfrecord_folder ~/val2017_tfrecords \
+python scripts/data/create_tfrecords_captioning.py --out_tfrecord_folder ~/val2017_tfrecords \
 --caption_folder ~/captions_val2017_features --image_folder ~/val2017_features --samples_per_shard 4096
 ```
 
@@ -134,13 +136,17 @@ subword-nmt apply-bpe -c joint_bpe.code --vocabulary tgt_vocab.txt --vocabulary-
 subword-nmt apply-bpe -c joint_bpe.code --vocabulary tgt_vocab.txt --vocabulary-threshold 50 < tgt_raw_test.txt > tgt_test.BPE.txt
 ```
 
-Then, generate the vocab file and the train/validation/test tfrecords files.
+Then, generate the vocab file. Alternately you may use the `gigaword_vocab.txt` provided in our repo, which we used to train our model. To do this, set the `vocab_file` argument to be `{voi_repo}/gigaword_vocab.txt`. 
 
-```
+```bash
 cd {folder_with_voi_repo}
 CUDA_VISIBLE_DEVICES=0 python scripts/data/process_gigaword.py --out_feature_folder {dataroot}/gigaword \
 --data_folder {dataroot}/gigaword --vocab_file {dataroot}/gigaword/gigaword_vocab.txt \
 --dataset_type train/validation/test --one_vocab
+```
+
+Finally, generate the train/validation/test tfrecords files.
+```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/data/create_tfrecords_gigaword.py --out_tfrecord_folder {dataroot}/gigaword \
 --feature_folder {dataroot}/gigaword --samples_per_shard 4096 --dataset_type train/validation/test
 ```
@@ -183,7 +189,7 @@ python wmt16-scripts/preprocess/remove-diacritics.py < src_validation.BPE.txt > 
 python wmt16-scripts/preprocess/remove-diacritics.py < src_test.BPE.txt > src_test.BPE.txt
 ```
 
-Generate the vocab file (joint vocab for the source and target languages). Since we forgot to remove the diacritics during our initial experiments and we appended all missing vocabs in the diacritics-removed corpus afterwards, the vocab file we used to train our model is slightly different from the one generated through the scripts below, so we have uploaded the vocab file we used to train our model as `ro_en_vocab.txt`.
+Generate the vocab file (joint vocab for the source and target languages). Since we forgot to remove the diacritics during our initial experiments and we appended all missing vocabs in the diacritics-removed corpus afterwards, the vocab file we used to train our model is slightly different from the one generated through the scripts below, so we have uploaded the vocab file we used to train our model as `ro_en_vocab.txt`. To use this vocab file, set the `vocab_file` argument to be `{voi_repo}/ro_en_vocab.txt`
 ```
 cd {folder_with_voi_repo}
 CUDA_VISIBLE_DEVICES=0 python scripts/data/process_wmt.py --out_feature_folder {dataroot}/wmt16_translate/ro-en \

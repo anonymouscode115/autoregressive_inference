@@ -1,4 +1,4 @@
-from voi.process.captions_gigaword import process_gigaword
+from voi.process.gigaword import process_gigaword
 import argparse
 
 

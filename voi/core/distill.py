@@ -1,4 +1,4 @@
-from voi.data.load import faster_rcnn_dataset
+from voi.data.load_captioning import faster_rcnn_dataset
 from voi.data.load_wmt import wmt_dataset
 from voi.nn.input import TransformerInput
 from voi.nn.input import RegionFeatureInput

@@ -1,4 +1,4 @@
-from voi.process.captions_django import process_django
+from voi.process.django import process_django
 import argparse
 
 

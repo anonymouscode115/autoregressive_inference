@@ -1,5 +1,5 @@
 from voi.core.sess_util import get_session
-from voi.data.load import faster_rcnn_dataset
+from voi.data.load_captioning import faster_rcnn_dataset
 from voi.data.load_wmt import wmt_dataset
 from voi.algorithms.beam_search import beam_search
 from voi.algorithms.adaptive_search import adaptive_search
