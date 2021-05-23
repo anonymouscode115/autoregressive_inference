@@ -364,7 +364,7 @@ nohup bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 python -u scripts/train.py \
 --decoder_init_lr 0.00005 --pt_init_lr 0.000005 --lr_schedule constant \
 --label_smoothing 0.1 \
 --order soft --policy_gradient without_bvn \
---kl_coeff 0.3 \
+--kl_coeff 0.5 \
 --action_refinement 4 \
 --share_embedding True \
 --pt_pg_type sinkhorn --pt_relative_embedding False --pt_positional_attention True \
@@ -387,7 +387,7 @@ nohup bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 python -u scripts/train.py \
 --decoder_init_lr 0.00005 --pt_init_lr 0.000005 --lr_schedule constant \
 --label_smoothing 0.1 \
 --order soft --policy_gradient without_bvn \
---kl_coeff 0.3 --kl_log_linear 0.03 \
+--kl_coeff 0.5 --kl_log_linear 0.03 \
 --action_refinement 4 \
 --share_embedding False \
 --embedding_align_coeff 100.0 \          # We later found that this is rather large; we guess 10.0 also works well
