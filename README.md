@@ -290,7 +290,7 @@ nohup bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 python -u scripts/train.py \
 --decoder_init_lr 0.0001 --pt_init_lr 0.00001 --lr_schedule constant \
 --label_smoothing 0.1 \
 --order soft --policy_gradient without_bvn \
---kl_coeff 0.3 \
+--kl_coeff 0.5 \
 --action_refinement 4 \
 --share_embedding True \
 --use_ppo \
@@ -307,43 +307,20 @@ nohup bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 python -u scripts/train.py \
 --vocab_file django_data/djangovocab.txt \
 --model_ckpt ckpt_refinement/nsds_django_voi.h5 \
 --batch_size 36 \
---num_epochs 200 \
+--num_epochs 300 \
 --embedding_size 512 --heads 8 --num_layers 6 \
 --first_layer discrete --final_layer indigo \
 --decoder_pretrain -1 \
 --decoder_init_lr 0.00003 --pt_init_lr 0.000003 --lr_schedule constant \
 --label_smoothing 0.1 \
 --order soft --policy_gradient without_bvn \
---kl_coeff 0.3 --kl_log_linear 0.03 \
+--kl_coeff 0.5 --kl_log_linear 0.002 \
 --action_refinement 4 \
 --share_embedding False \
 --use_ppo \
 --pt_pg_type sinkhorn --pt_relative_embedding False --pt_positional_attention True \
 --reward_std False \
 --hungarian_op_path {path_to hungarian.so}" > nohup_nsds_django_voi2.txt
-
-# Further anneal the kl regularization to make the encoder converge to single ordering for each data.
-# This could also be combined into the last step by training the model longer.
-nohup bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 python -u scripts/train.py \
---dataset django \
---train_folder django_data/train \
---vocab_file django_data/djangovocab.txt \
---model_ckpt ckpt_refinement/nsds_django_voi.h5 \
---batch_size 36 \
---num_epochs 50 \
---embedding_size 512 --heads 8 --num_layers 6 \
---first_layer discrete --final_layer indigo \
---decoder_pretrain -1 \
---decoder_init_lr 0.00003 --pt_init_lr 0.000003 --lr_schedule constant \
---label_smoothing 0.1 \
---order soft --policy_gradient without_bvn \
---kl_coeff 0.03 --kl_log_linear 0.003 \
---action_refinement 4 \
---share_embedding False \
---use_ppo \
---pt_pg_type sinkhorn --pt_relative_embedding False --pt_positional_attention True \
---reward_std False \
---hungarian_op_path {path_to hungarian.so}" > nohup_nsds_django_voi3.txt
 
 # Finally fix the encoder Transformer and finetune the decoder Transformer with larger batch size.
 # This can be achieved through the "alternate_training" argument, which designates the number of
