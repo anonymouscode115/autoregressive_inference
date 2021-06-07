@@ -369,6 +369,7 @@ nohup bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 python -u scripts/train.py \
 --share_embedding True \
 --pt_pg_type sinkhorn --pt_relative_embedding False --pt_positional_attention True \
 --reward_std False \
+--use_ppo \
 --hungarian_op_path {path_to hungarian.so}" > nohup_nsds_gigaword_voi1.txt
 
 # Then train with embedding separated and kl regularization annealed.
@@ -393,6 +394,7 @@ nohup bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 python -u scripts/train.py \
 --embedding_align_coeff 100.0 \          # We later found that this is rather large; we guess 10.0 also works well
 --pt_pg_type sinkhorn --pt_relative_embedding False --pt_positional_attention True \
 --reward_std False \
+--use_ppo \
 --hungarian_op_path {path_to hungarian.so}" > nohup_nsds_gigaword_voi2.txt
 
 # Finally fix the encoder Transformer and finetune the decoder Transformer with larger batch size.
@@ -442,6 +444,7 @@ nohup bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8 python -u scripts/train.py
 --share_embedding True \
 --pt_pg_type sinkhorn --pt_relative_embedding False --pt_positional_attention True \
 --reward_std False \
+--use_ppo \
 --hungarian_op_path {path_to hungarian.so}
 --save_interval 50000" > nohup_nsds_wmt_voi1.txt
 
@@ -467,6 +470,7 @@ nohup bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8 python -u scripts/train.py
 --share_embedding False \
 --pt_pg_type sinkhorn --pt_relative_embedding False --pt_positional_attention True \
 --reward_std False \
+--use_ppo \
 --hungarian_op_path {path_to hungarian.so}
 --save_interval 50000" > nohup_nsds_wmt_voi2.txt
 
