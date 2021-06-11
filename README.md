@@ -1,6 +1,6 @@
 # Discovering Non-monotonic Autoregressive Orderings with Variational Inference
 
-## Note: We are currently in the process of finalizing our ICLR camera ready version and arxiving our paper. There are still some new ideas that we are trying at the moment. We expect to release an updated version of code (in deanonymized repo) and the pretrained models along with many more results by early July, 2021 (sorry for the delay).
+## Note: We are currently in the process of arxiving our paper. There are still some new ideas that we are trying at the moment. We expect to release an updated version of code (in deanonymized repo) and the pretrained models along with many more results by early July, 2021 (sorry for the delay).
 
 ## Description
 
