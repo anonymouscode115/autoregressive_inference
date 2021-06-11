@@ -240,7 +240,7 @@ nohup bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 python -u scripts/train.py \
 --decoder_init_lr 0.0001 --pt_init_lr 0.00001 --lr_schedule constant \
 --label_smoothing 0.1 \
 --order soft --policy_gradient without_bvn \
---kl_coeff 0.3 --action_refinement 4 --share_embedding True \
+--kl_coeff 0.5 --action_refinement 4 --share_embedding True \
 --pt_pg_type sinkhorn --pt_relative_embedding False --pt_positional_attention True \
 --reward_std False \
 --hungarian_op_path {path_to hungarian.so}" > nohup_coco_voi1.txt
@@ -252,26 +252,28 @@ nohup bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 python -u scripts/train.py \
 # try this when we ran the experiments. This could further improve the results.
 # We also observe that the performance is slightly harmed if the model is trained for too long, so 
 # we save every 10k iterations and evaluate using the best model.
-nohup bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 python -u scripts/train.py \
+Step1: nohup bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 python -u scripts/train.py \
 --dataset captioning \
 --train_folder ~/train2017_tfrecords \
 --vocab_file train2017_vocab.txt \
 --model_ckpt ckpt_refinement/nsds_coco_voi.h5 \
---batch_size 36 \
---num_epochs 15 \
+--batch_size 32 \
+--num_epochs 10 \
 --embedding_size 512 --heads 8 --num_layers 6 \
 --first_layer region --final_layer indigo \
 --decoder_pretrain -1 \
---decoder_init_lr 0.00005 --pt_init_lr 0.000005 --lr_schedule constant \       # could further set the learning rates to be (3e-5, 3e-6) after epoch 10
+--decoder_init_lr 0.00005 --pt_init_lr 0.000005 --lr_schedule constant \
 --label_smoothing 0.1 \
 --order soft --policy_gradient without_bvn \
---kl_coeff 0.3  --kl_log_linear 0.03 \
+--kl_coeff 0.5  --kl_log_linear 0.1 \
 --action_refinement 4 \
 --share_embedding False \
 --pt_pg_type sinkhorn --pt_relative_embedding False --pt_positional_attention True \
 --reward_std False \
 --hungarian_op_path {path_to hungarian.so} \
 --save_interval 10000" > nohup_coco_voi2.txt
+
+Step2: Use the same script as above, but set --num_epochs 5 --decoder_init_lr 0.00002 --pt_init_lr 0.000002 --lr_schedule constant --kl_coeff 0.1 --kl_log_linear 0.05
 ```
 
 #### Django
@@ -391,7 +393,7 @@ nohup bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 python -u scripts/train.py \
 --kl_coeff 0.5 --kl_log_linear 0.03 \
 --action_refinement 4 \
 --share_embedding False \
---embedding_align_coeff 100.0 \          # We later found that this is rather large; we guess 10.0 also works well
+--embedding_align_coeff 200.0 \
 --pt_pg_type sinkhorn --pt_relative_embedding False --pt_positional_attention True \
 --reward_std False \
 --use_ppo \
@@ -465,7 +467,7 @@ nohup bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8 python -u scripts/train.py
 --label_smoothing 0.1 \
 --order soft --policy_gradient without_bvn \
 --kl_coeff 0.3 --kl_log_linear 0.01 \           # --kl_coeff 0.01 --kl_log_linear 0.0007 afterwards
---embedding_align_coeff 10.0 \
+--embedding_align_coeff 200.0 \
 --action_refinement 3 \
 --share_embedding False \
 --pt_pg_type sinkhorn --pt_relative_embedding False --pt_positional_attention True \
