@@ -129,7 +129,7 @@ class PermutationTransformer(Sequential):
 
         # the encoder processes values and the decoder processes queries
         # build the encoder first in the stack
-        if dataset == 'captioning' or not (pt_relative_embedding and pt_positional_attention):
+        if dataset == 'captioning' or not (pt_relative_embedding or pt_positional_attention):
             layers.extend([EncoderLayer(
                 hidden_size, hidden_size * 4, heads,
                 queries_dropout=queries_dropout,
