@@ -1,6 +1,6 @@
 # Discovering Non-monotonic Autoregressive Orderings with Variational Inference
 
-## Obsolete. Please see https://github.com/xuanlinli17/autoregressive_inference
+## Obsolete. Please visit https://github.com/xuanlinli17/autoregressive_inference
 
 ## Description
 
